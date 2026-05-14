@@ -21,9 +21,10 @@ input from cached input so the two tools line up on the same axes.
 
 ## Quick start
 
+Requires [uv](https://docs.astral.sh/uv/).
+
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -e .
+uv sync                                   # create .venv + install deps
 make ingest                               # first run
 make server                               # http://127.0.0.1:8732
 ```
@@ -82,3 +83,7 @@ tokens.db        sqlite (generated; gitignored)
   with `mcp__` is recorded with its server and tool name. The matching `tool_result` /
   `function_call_output` is linked by `tool_use_id` / `call_id`, and we record its size in
   bytes (the size that will be re-injected as input on the next turn).
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

@@ -2,12 +2,17 @@
 name = "token-tracker"
 version = "0.1.0"
 description = "Tracks Claude Code and Codex token usage + cost"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["tracker*"]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tracker"]
