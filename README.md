@@ -7,6 +7,8 @@ MCP-server usage.
 
 Nothing leaves your machine.
 
+![token-tracker dashboard](docs/dashboard.png)
+
 ## Data sources
 
 | Tool   | Path                                                | Per-message tokens                                                                 |
