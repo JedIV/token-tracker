@@ -81,7 +81,7 @@ function bucketTooltipTitle(bucket, granularity) {
 }
 
 const STATE = { filters: { tool: "", model: "", project: "", start: "", end: "", granularity: "auto" } };
-let tokenChart, hitsChart, costChart;
+let usageChart, costChart, breakdownChart;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -127,19 +127,18 @@ function renderCards(totals) {
   const cost = totals.cost_usd || 0;
   const ah = totals.active_hours || 0;
   const cph = totals.cost_per_hour || 0;
-  const tph = totals.tokens_per_hour || 0;
+  const freshTokens = tokens_in + tokens_out + tokens_cw5 + tokens_cw1;
+  const allTokens = freshTokens + tokens_hit;
+  const cacheShare = allTokens ? tokens_hit / allTokens : 0;
   const cards = [
+    { label: "est cost", value: fmt.usd(cost), accent: true },
+    { label: "$ / active hour", value: fmt.usd(cph), accent: true, sub: "Σ session spans" },
+    { label: "fresh + output tokens", value: fmt.short(freshTokens), sub: fmt.n(freshTokens) },
+    { label: "cache share", value: Math.round(cacheShare * 100) + "%", sub: fmt.n(tokens_hit) + " cache hits" },
     { label: "sessions", value: fmt.n(totals.sessions) },
     { label: "messages", value: fmt.n(totals.msgs) },
-    { label: "active hours", value: ah < 1 ? ah.toFixed(2) : ah.toFixed(1), sub: "Σ session spans" },
-    { label: "$ / hour", value: fmt.usd(cph), accent: true, sub: "per active hour" },
-    { label: "tokens / hour", value: fmt.short(tph), sub: fmt.n(tph) + " /hr" },
-    { label: "input (fresh)", value: fmt.short(tokens_in), sub: fmt.n(tokens_in) },
-    { label: "output", value: fmt.short(tokens_out), sub: fmt.n(tokens_out) },
-    { label: "cache hits", value: fmt.short(tokens_hit), sub: fmt.n(tokens_hit) },
-    { label: "cache write 5m", value: fmt.short(tokens_cw5), sub: fmt.n(tokens_cw5) },
-    { label: "cache write 1h", value: fmt.short(tokens_cw1), sub: fmt.n(tokens_cw1) },
-    { label: "est cost (usd)", value: fmt.usd(cost), accent: true },
+    { label: "active hours", value: ah < 1 ? ah.toFixed(2) : ah.toFixed(1) },
+    { label: "cache writes", value: fmt.short(tokens_cw5 + tokens_cw1), sub: fmt.n(tokens_cw5 + tokens_cw1) },
   ];
   $("#cards").innerHTML = cards.map(c => `
     <div class="card ${c.accent ? "accent" : ""}">
@@ -172,6 +171,10 @@ const chartCommon = {
 };
 
 function renderCharts(daily, granularity) {
+  if (typeof Chart === "undefined") {
+    $("#gran-label").textContent = "· charts unavailable";
+    return;
+  }
   const buckets = daily.map(d => d.bucket);
   const labels = buckets.map(b => bucketLabel(b, granularity));
   $("#gran-label").textContent = `· bucket: ${granularity} · ${daily.length} points`;
@@ -193,57 +196,132 @@ function renderCharts(daily, granularity) {
   const colors = {
     in: "#7cc4ff", out: "#ffd479", hit: "#7fe6a8", cw5: "#c9a4ff", cw1: "#ff9bb3", usd: "#ffd479",
   };
-
-  // chart 1: non-cache-hit tokens (input, output, both cache writes), stacked
-  const nonHitDatasets = [
-    { label: "input", data: daily.map(d => d.input_tokens), backgroundColor: colors.in, borderColor: colors.in, stack: "tok" },
-    { label: "output", data: daily.map(d => d.output_tokens), backgroundColor: colors.out, borderColor: colors.out, stack: "tok" },
-    { label: "cache write 5m", data: daily.map(d => d.cache_write_5m), backgroundColor: colors.cw5, borderColor: colors.cw5, stack: "tok" },
-    { label: "cache write 1h", data: daily.map(d => d.cache_write_1h), backgroundColor: colors.cw1, borderColor: colors.cw1, stack: "tok" },
-  ];
-
   const titleStyle = (text) => ({ display: true, text, color: "#9aa1ad", font: { size: 11, family: "ui-monospace, monospace" } });
-
-  if (tokenChart) tokenChart.destroy();
-  tokenChart = new Chart($("#chart-tokens"), {
-    type: "bar",
-    data: { labels, datasets: nonHitDatasets },
-    options: {
-      ...chartCommon,
-      plugins: { ...chartCommon.plugins, title: titleStyle("input · output · cache writes"), tooltip: sharedTooltip },
-      scales: {
-        x: { ...chartCommon.scales.x, ticks: xTicks, stacked: true },
-        y: { ...chartCommon.scales.y, stacked: true },
+  try {
+    if (usageChart) usageChart.destroy();
+    usageChart = new Chart($("#chart-usage"), {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "input",
+            data: daily.map(d => d.input_tokens),
+            backgroundColor: colors.in,
+            borderColor: colors.in,
+            stack: "tokens",
+          },
+          {
+            label: "output",
+            data: daily.map(d => d.output_tokens),
+            backgroundColor: colors.out,
+            borderColor: colors.out,
+            stack: "tokens",
+          },
+          {
+            label: "cache writes",
+            data: daily.map(d => (d.cache_write_5m || 0) + (d.cache_write_1h || 0)),
+            backgroundColor: colors.cw5,
+            borderColor: colors.cw5,
+            stack: "tokens",
+          },
+        ],
       },
-    },
-  });
-
-  // chart 2: cache hits alone (separate scale)
-  if (hitsChart) hitsChart.destroy();
-  hitsChart = new Chart($("#chart-hits"), {
-    type: "bar",
-    data: { labels, datasets: [{ label: "cache hits", data: daily.map(d => d.cache_hit), backgroundColor: colors.hit, borderColor: colors.hit }] },
-    options: {
-      ...chartCommon,
-      plugins: { ...chartCommon.plugins, title: titleStyle("cache hits (own scale)"), tooltip: sharedTooltip },
-      scales: { x: { ...chartCommon.scales.x, ticks: xTicks }, y: chartCommon.scales.y },
-    },
-  });
-
-  // chart 3: cost
-  if (costChart) costChart.destroy();
-  costChart = new Chart($("#chart-cost"), {
-    type: "bar",
-    data: { labels, datasets: [{ label: "usd", data: daily.map(d => d.cost_usd), backgroundColor: colors.usd, borderColor: colors.usd }] },
-    options: {
-      ...chartCommon,
-      plugins: { ...chartCommon.plugins, title: titleStyle("estimated cost (USD)"), tooltip: sharedTooltip },
-      scales: {
-        x: { ...chartCommon.scales.x, ticks: xTicks },
-        y: { ...chartCommon.scales.y, ticks: { ...chartCommon.scales.y.ticks, callback: (v) => "$" + fmt.short(v) } },
+      options: {
+        ...chartCommon,
+        plugins: { ...chartCommon.plugins, title: titleStyle("non-cache tokens by bucket"), tooltip: sharedTooltip },
+        scales: {
+          x: { ...chartCommon.scales.x, ticks: xTicks, stacked: true },
+          y: { ...chartCommon.scales.y, stacked: true },
+        },
       },
-    },
-  });
+    });
+
+    if (costChart) costChart.destroy();
+    costChart = new Chart($("#chart-cost"), {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [{
+          label: "cost",
+          data: daily.map(d => d.cost_usd),
+          backgroundColor: "rgba(255, 212, 121, 0.72)",
+          borderColor: colors.usd,
+        }],
+      },
+      options: {
+        ...chartCommon,
+        plugins: { ...chartCommon.plugins, title: titleStyle("estimated cost by bucket"), tooltip: sharedTooltip },
+        scales: {
+          x: { ...chartCommon.scales.x, ticks: xTicks },
+          y: { ...chartCommon.scales.y, ticks: { ...chartCommon.scales.y.ticks, callback: (v) => "$" + fmt.short(v) } },
+        },
+      },
+    });
+  } catch (e) {
+    console.error("main chart failed", e);
+    $("#gran-label").textContent = `· bucket: ${granularity} · chart failed`;
+  }
+}
+
+function labelForGroupRow(group, r) {
+  if (group === "tool") return r.tool;
+  if (group === "model") return r.model;
+  if (group === "project") return fmt.pathTail(r.project, 32);
+  if (group === "session") return `${r.tool} · ${fmt.pathTail(r.cwd || r.id, 28)}`;
+  if (group === "server") return r.server;
+  if (group === "mcp_tool") return `${r.server} · ${r.tool_name}`;
+  return "";
+}
+
+async function renderBreakdownChart(group) {
+  if (typeof Chart === "undefined") return;
+  if (breakdownChart) breakdownChart.destroy();
+  const canvas = $("#chart-breakdown");
+  try {
+    const d = await api("/api/breakdown_series" + queryString({ group, limit: 5 }));
+    if (!d.series || !d.series.length) {
+      breakdownChart = null;
+      return;
+    }
+
+    const labels = d.buckets.map(b => bucketLabel(b, d.granularity));
+    const buckets = d.buckets;
+    const palette = ["#ffd479", "#7cc4ff", "#7fe6a8", "#ff9bb3", "#c9a4ff"];
+    breakdownChart = new Chart(canvas, {
+      type: "line",
+      data: {
+        labels,
+        datasets: d.series.map((s, i) => ({
+          label: fmt.pathTail(s.label, 58),
+          data: s.points.map(p => p.cost_usd),
+          borderColor: palette[i % palette.length],
+          backgroundColor: palette[i % palette.length],
+          tension: 0.25,
+          pointRadius: 2,
+          fill: false,
+        })),
+      },
+      options: {
+        ...chartCommon,
+        plugins: {
+          ...chartCommon.plugins,
+          title: { display: true, text: "top 5 by estimated cost over time", color: "#9aa1ad", font: { size: 11, family: "ui-monospace, monospace" } },
+          tooltip: {
+            ...chartCommon.plugins.tooltip,
+            callbacks: { title: (items) => bucketTooltipTitle(buckets[items[0].dataIndex], d.granularity) },
+          },
+        },
+        scales: {
+          x: { ...chartCommon.scales.x, ticks: { ...chartCommon.scales.x.ticks, autoSkip: true, maxRotation: 0, minRotation: 0, maxTicksLimit: Math.min(12, labels.length) } },
+          y: { ...chartCommon.scales.y, ticks: { ...chartCommon.scales.y.ticks, callback: (v) => "$" + fmt.short(v) } },
+        },
+      },
+    });
+  } catch (e) {
+    console.error("breakdown chart failed", e);
+    breakdownChart = null;
+  }
 }
 
 function tableHTML(cols, rows, opts = {}) {
@@ -409,6 +487,7 @@ async function loadBreakdown() {
   }
 
   setTable("#t-breakdown", BREAKDOWN_COLS[g], rows, clickFn ? { click: clickFn } : {});
+  renderBreakdownChart(g);
 }
 
 async function showMcpServer(server, toolName) {

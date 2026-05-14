@@ -238,6 +238,125 @@ def stats(
     }
 
 
+@app.get("/api/breakdown_series")
+def breakdown_series(
+    group: str = Query("model", pattern="^(tool|model|project|session|server|mcp_tool)$"),
+    tool: str | None = Query(None),
+    model: str | None = Query(None),
+    project: str | None = Query(None),
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    granularity: str = Query("auto"),
+    limit: int = Query(5, ge=1, le=10),
+):
+    """Top-N cost lines for the selected breakdown over the same buckets as /api/stats."""
+    gran = granularity if granularity in _GRANULARITY else _pick_granularity(start, end)
+
+    if group in {"server", "mcp_tool"}:
+        bucket = _GRANULARITY[gran].replace("m.ts", "mc.ts")
+        clauses = []
+        params: list = []
+        if tool:
+            clauses.append("mc.tool = ?"); params.append(tool)
+        if model:
+            clauses.append("s.model = ?"); params.append(model)
+        if project:
+            clauses.append("s.cwd = ?"); params.append(project)
+        if start:
+            clauses.append("mc.ts >= ?"); params.append(start)
+        if end:
+            clauses.append("mc.ts <= ?"); params.append(end)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        join = f"FROM mcp_calls mc JOIN sessions s ON s.id = mc.session_id{where}"
+
+        with db() as c:
+            rows = list(c.execute(
+                f"""SELECT {bucket} AS bucket,
+                           mc.server, mc.tool_name, mc.est_result_tokens AS tokens,
+                           s.tool AS tool, s.model AS model,
+                           (SELECT COUNT(*) FROM messages mm
+                            WHERE mm.session_id = mc.session_id AND mm.ts > mc.ts) AS subseq
+                    {join}
+                    ORDER BY bucket""", params))
+
+        from collections import defaultdict
+        totals = defaultdict(float)
+        labels = {}
+        by_bucket = defaultdict(lambda: defaultdict(float))
+        for r in rows:
+            key = r["server"] if group == "server" else f"{r['server']}\u001f{r['tool_name']}"
+            label = r["server"] if group == "server" else f"{r['server']} · {r['tool_name']}"
+            cost = _per_call_lifecycle_cost(r["tokens"] or 0, r["tool"], r["model"], r["subseq"] or 0)
+            totals[key] += cost
+            labels[key] = label
+            by_bucket[key][r["bucket"]] += cost
+
+        buckets = sorted({r["bucket"] for r in rows})
+        top_keys = [k for k, _ in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]]
+        series = [{
+            "key": key,
+            "label": labels[key],
+            "total_cost_usd": round(totals[key], 6),
+            "points": [{"bucket": b, "cost_usd": round(by_bucket[key].get(b, 0.0), 6)} for b in buckets],
+        } for key in top_keys]
+        return {"granularity": gran, "buckets": buckets, "series": series}
+
+    group_exprs = {
+        "tool": ("m.tool", "m.tool"),
+        "model": ("COALESCE(m.model,'(unknown)') || '\u001f' || m.tool",
+                  "COALESCE(m.model,'(unknown)') || ' · ' || m.tool"),
+        "project": ("COALESCE(s.cwd,'(unknown)')", "COALESCE(s.cwd,'(unknown)')"),
+        "session": ("s.id", "s.tool || ' · ' || COALESCE(s.cwd, s.id)"),
+    }
+    key_expr, label_expr = group_exprs[group]
+    bucket = _GRANULARITY[gran]
+    where, params = _filter_clause(tool, model, project, start, end)
+    join = "FROM messages m JOIN sessions s ON s.id = m.session_id" + where
+
+    with db() as c:
+        top = [dict(r) for r in c.execute(
+            f"""SELECT {key_expr} AS key,
+                       {label_expr} AS label,
+                       SUM(m.est_cost_usd) AS cost_usd
+                {join}
+                GROUP BY key, label
+                ORDER BY cost_usd DESC
+                LIMIT ?""",
+            (*params, limit),
+        ).fetchall()]
+
+        if not top:
+            return {"granularity": gran, "buckets": [], "series": []}
+
+        keys = [r["key"] for r in top]
+        placeholders = ",".join("?" for _ in keys)
+        rows = [dict(r) for r in c.execute(
+            f"""SELECT {bucket} AS bucket,
+                       {key_expr} AS key,
+                       SUM(m.est_cost_usd) AS cost_usd
+                {join}
+                  {"AND" if where else "WHERE"} {key_expr} IN ({placeholders})
+                GROUP BY bucket, key
+                ORDER BY bucket""",
+            (*params, *keys),
+        ).fetchall()]
+
+    buckets = sorted({r["bucket"] for r in rows})
+    costs_by_key = {k: {b: 0.0 for b in buckets} for k in keys}
+    for r in rows:
+        costs_by_key[r["key"]][r["bucket"]] = r["cost_usd"] or 0.0
+
+    labels = {r["key"]: r["label"] for r in top}
+    totals = {r["key"]: r["cost_usd"] or 0.0 for r in top}
+    series = [{
+        "key": key,
+        "label": labels[key],
+        "total_cost_usd": round(totals[key], 6),
+        "points": [{"bucket": b, "cost_usd": round(costs_by_key[key].get(b, 0.0), 6)} for b in buckets],
+    } for key in keys]
+    return {"granularity": gran, "buckets": buckets, "series": series}
+
+
 @app.get("/api/sessions")
 def sessions(
     tool: str | None = Query(None),

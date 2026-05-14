@@ -93,8 +93,10 @@ header {
   font-weight: 600;
 }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-.chart-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; }
 .chart-wrap { background: var(--panel); border: 1px solid var(--border); padding: 12px; height: 260px; position: relative; }
+.hero-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.hero-chart { height: 320px; }
+.breakdown-chart { height: 260px; margin-bottom: 14px; }
 
 table {
   width: 100%;
@@ -144,5 +146,6 @@ footer { padding: 14px 20px; color: var(--text-mute); border-top: 1px solid var(
 
 @media (max-width: 900px) {
   .grid-2 { grid-template-columns: 1fr; }
-  .chart-row { grid-template-columns: 1fr; }
+  .hero-charts { grid-template-columns: 1fr; }
+  .hero-chart { height: 280px; }
 }
