@@ -1,0 +1,13 @@
+[project]
+name = "token-tracker"
+version = "0.1.0"
+description = "Tracks Claude Code and Codex token usage + cost"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tracker*"]

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+tokens.db
+tokens.db-shm
+tokens.db-wal
+.DS_Store
+*.log
+.claude/

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>token tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <div class="brand">token tracker</div>
+    <div class="actions">
+      <span id="health" class="health"></span>
+      <button id="recompute" class="btn" title="re-apply prices.json to existing rows">recompute prices</button>
+      <button id="reingest" class="btn">re-ingest</button>
+    </div>
+  </header>
+
+  <section class="filters">
+    <label>tool
+      <select id="f-tool"><option value="">all</option></select>
+    </label>
+    <label>model
+      <select id="f-model"><option value="">all</option></select>
+    </label>
+    <label>project
+      <select id="f-project"><option value="">all</option></select>
+    </label>
+    <label>from
+      <input type="date" id="f-start">
+    </label>
+    <label>to
+      <input type="date" id="f-end">
+    </label>
+    <button id="apply" class="btn primary">apply</button>
+    <button id="reset" class="btn">reset</button>
+    <span class="range-presets">
+      <button class="btn range" data-range="1h">1h</button>
+      <button class="btn range" data-range="24h">24h</button>
+      <button class="btn range" data-range="7d">7d</button>
+      <button class="btn range" data-range="30d">30d</button>
+      <button class="btn range" data-range="all">all</button>
+    </span>
+  </section>
+
+  <section class="cards" id="cards"></section>
+
+  <section class="panel">
+    <div class="row-controls">
+      <h2 style="margin: 0">usage over time</h2>
+      <label>granularity
+        <select id="f-granularity">
+          <option value="auto">auto</option>
+          <option value="minute">minute</option>
+          <option value="hour">hour</option>
+          <option value="day">day</option>
+          <option value="week">week</option>
+          <option value="month">month</option>
+        </select>
+      </label>
+      <span class="muted" id="gran-label"></span>
+    </div>
+    <div class="chart-row">
+      <div class="chart-wrap"><canvas id="chart-tokens"></canvas></div>
+      <div class="chart-wrap"><canvas id="chart-hits"></canvas></div>
+      <div class="chart-wrap"><canvas id="chart-cost"></canvas></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="row-controls">
+      <h2 style="margin: 0">breakdown</h2>
+      <span class="group-toggles">
+        <button class="btn group" data-group="tool">by tool</button>
+        <button class="btn group active" data-group="model">by model</button>
+        <button class="btn group" data-group="project">by project</button>
+        <button class="btn group" data-group="session">by session</button>
+        <button class="btn group" data-group="server">by mcp server</button>
+        <button class="btn group" data-group="mcp_tool">by mcp tool</button>
+      </span>
+      <span id="group-controls"></span>
+      <span class="muted" id="group-hint"></span>
+    </div>
+    <table id="t-breakdown"></table>
+  </section>
+
+  <div id="session-detail" class="modal hidden">
+    <div class="modal-body">
+      <div class="modal-head">
+        <h3 id="sd-title"></h3>
+        <button id="sd-close" class="btn">close</button>
+      </div>
+      <div id="sd-content"></div>
+    </div>
+  </div>
+
+  <footer>
+    <span id="last-run" class="muted"></span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

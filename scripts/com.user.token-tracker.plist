@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent: runs ingest every 5 minutes.
+
+  Install:
+    sed "s|__HOME__|$HOME|g; s|__PROJECT__|$PWD|g" scripts/com.user.token-tracker.plist \
+      > ~/Library/LaunchAgents/com.user.token-tracker.plist
+    launchctl load -w ~/Library/LaunchAgents/com.user.token-tracker.plist
+
+  Uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.user.token-tracker.plist
+    rm ~/Library/LaunchAgents/com.user.token-tracker.plist
+
+  Tail logs:
+    tail -f __HOME__/Library/Logs/token-tracker.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>           <string>com.user.token-tracker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROJECT__/scripts/run-ingest.sh</string>
+  </array>
+  <key>StartInterval</key>   <integer>300</integer>
+  <key>RunAtLoad</key>       <true/>
+  <key>StandardOutPath</key> <string>__HOME__/Library/Logs/token-tracker.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/token-tracker.log</string>
+  <key>WorkingDirectory</key><string>__PROJECT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+  </dict>
+</dict>
+</plist>
