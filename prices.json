@@ -17,11 +17,12 @@
     "gpt-5":             {"input":  1.25, "output": 10.00, "cache_read": 0.125},
     "gpt-5-mini":        {"input":  0.25, "output":  2.00, "cache_read": 0.025},
     "gpt-5-codex":       {"input":  1.25, "output": 10.00, "cache_read": 0.125},
-    "gpt-5.2-codex":     {"input":  1.25, "output": 10.00, "cache_read": 0.125},
-    "gpt-5.3-codex":     {"input":  1.25, "output": 10.00, "cache_read": 0.125},
-    "gpt-5.4":           {"input":  1.25, "output": 10.00, "cache_read": 0.125},
-    "gpt-5.4-mini":      {"input":  0.25, "output":  2.00, "cache_read": 0.025},
-    "gpt-5.5":           {"input":  1.25, "output": 10.00, "cache_read": 0.125},
+    "gpt-5.2":           {"input":  1.75, "output": 14.00, "cache_read": 0.175},
+    "gpt-5.2-codex":     {"input":  1.75, "output": 14.00, "cache_read": 0.175},
+    "gpt-5.3-codex":     {"input":  1.75, "output": 14.00, "cache_read": 0.175},
+    "gpt-5.4":           {"input":  2.50, "output": 15.00, "cache_read": 0.250},
+    "gpt-5.4-mini":      {"input":  0.75, "output":  4.50, "cache_read": 0.075},
+    "gpt-5.5":           {"input":  5.00, "output": 30.00, "cache_read": 0.500},
     "_default":          {"input":  1.25, "output": 10.00, "cache_read": 0.125}
   }
 }

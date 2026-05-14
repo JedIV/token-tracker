@@ -3,7 +3,7 @@ upserts to SQLite, recomputes session aggregates."""
 from __future__ import annotations
 
 import argparse
-import os
+import math
 import sqlite3
 import sys
 import time
@@ -91,7 +91,7 @@ def _insert_messages(conn: sqlite3.Connection, rows) -> int:
 def _insert_mcp(conn: sqlite3.Connection, rows) -> int:
     added = 0
     for r in rows:
-        est_tokens = r.result_chars // EST_CHARS_PER_TOKEN
+        est_tokens = math.ceil(r.result_chars / EST_CHARS_PER_TOKEN) if r.result_chars else 0
         cur = conn.execute(
             """INSERT OR IGNORE INTO mcp_calls
                (session_id, tool, ts, server, tool_name, call_id, result_chars,

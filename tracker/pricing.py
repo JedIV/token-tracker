@@ -25,23 +25,13 @@ def _lookup(tool: str, model: str | None) -> dict:
     if model in table:
         return table[model]
 
-    # Variant suffixes — "-mini" should never fall back to a full-size base price.
-    is_mini = "-mini" in model
     keys = sorted([k for k in table if not k.startswith("_")], key=len, reverse=True)
 
-    # 1) longest prefix match, preferring keys that share the mini-ness.
+    # Match dated snapshots and aliases, but do not let family names swallow
+    # distinct models: gpt-5 must not price gpt-5.4, gpt-5.4-nano, etc.
     for k in keys:
-        if model.startswith(k) and (is_mini == ("mini" in k)):
+        if model.startswith(k + "-"):
             return table[k]
-    # 2) relax the mini constraint only if no mini variant exists in the table.
-    if is_mini and not any("mini" in k for k in keys):
-        for k in keys:
-            if model.startswith(k):
-                return table[k]
-    if not is_mini:
-        for k in keys:
-            if model.startswith(k) and "mini" not in k:
-                return table[k]
 
     return table.get("_default", {"input": 0, "output": 0, "cache_read": 0})
 

@@ -246,21 +246,9 @@ def sessions(
     start: str | None = Query(None),
     end: str | None = Query(None),
     limit: int = Query(200, ge=1, le=2000),
-    sort: str = Query("cost", regex="^(cost|recent|messages)$"),
+    sort: str = Query("cost", pattern="^(cost|recent|messages)$"),
 ):
-    clauses = []
-    params: list = []
-    if tool:
-        clauses.append("tool = ?"); params.append(tool)
-    if model:
-        clauses.append("model = ?"); params.append(model)
-    if project:
-        clauses.append("cwd = ?"); params.append(project)
-    if start:
-        clauses.append("ended_at >= ?"); params.append(start)
-    if end:
-        clauses.append("started_at <= ?"); params.append(end)
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    where, params = _filter_clause(tool, model, project, start, end)
     order = {
         "cost": "est_cost_usd DESC",
         "recent": "ended_at DESC",
@@ -268,24 +256,98 @@ def sessions(
     }[sort]
     with db() as c:
         rows = [dict(r) for r in c.execute(
-            f"SELECT * FROM sessions{where} ORDER BY {order} LIMIT ?",
+            f"""SELECT
+                  s.id,
+                  s.tool,
+                  s.session_uuid,
+                  s.cwd,
+                  s.model,
+                  MIN(m.ts) AS started_at,
+                  MAX(m.ts) AS ended_at,
+                  COUNT(*) AS msg_count,
+                  COALESCE(SUM(m.input_tokens),0) AS input_tokens,
+                  COALESCE(SUM(m.output_tokens),0) AS output_tokens,
+                  COALESCE(SUM(m.cache_read),0) AS cache_read,
+                  COALESCE(SUM(m.cache_write_5m + m.cache_write_1h),0) AS cache_write,
+                  COALESCE(SUM(m.reasoning_tokens),0) AS reasoning_tokens,
+                  COALESCE(SUM(m.est_cost_usd),0) AS est_cost_usd
+                FROM messages m JOIN sessions s ON s.id = m.session_id
+                {where}
+                GROUP BY s.id
+                ORDER BY {order}
+                LIMIT ?""",
             (*params, limit)).fetchall()]
     return {"sessions": rows}
 
 
 @app.get("/api/session/{session_id:path}")
-def session_detail(session_id: str):
+def session_detail(
+    session_id: str,
+    tool: str | None = Query(None),
+    model: str | None = Query(None),
+    project: str | None = Query(None),
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+):
+    filters, filter_params = _filter_clause(tool, model, project, start, end)
+    where = " WHERE m.session_id = ?" + filters.replace(" WHERE", " AND", 1)
+    params = [session_id, *filter_params]
     with db() as c:
-        row = c.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-        if not row:
+        base = c.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if not base:
             raise HTTPException(404, "session not found")
+        row = c.execute(
+            f"""SELECT
+                  s.id,
+                  s.tool,
+                  s.session_uuid,
+                  s.cwd,
+                  s.model,
+                  MIN(m.ts) AS started_at,
+                  MAX(m.ts) AS ended_at,
+                  COUNT(m.id) AS msg_count,
+                  COALESCE(SUM(m.input_tokens),0) AS input_tokens,
+                  COALESCE(SUM(m.output_tokens),0) AS output_tokens,
+                  COALESCE(SUM(m.cache_read),0) AS cache_read,
+                  COALESCE(SUM(m.cache_write_5m + m.cache_write_1h),0) AS cache_write,
+                  COALESCE(SUM(m.reasoning_tokens),0) AS reasoning_tokens,
+                  COALESCE(SUM(m.est_cost_usd),0) AS est_cost_usd
+                FROM sessions s LEFT JOIN messages m ON s.id = m.session_id
+                {where}
+                GROUP BY s.id""",
+            params,
+        ).fetchone()
         msgs = [dict(r) for r in c.execute(
-            "SELECT ts, model, input_tokens, output_tokens, cache_read, cache_write_5m, cache_write_1h, reasoning_tokens, est_cost_usd FROM messages WHERE session_id=? ORDER BY ts",
-            (session_id,)).fetchall()]
+            f"""SELECT m.ts, m.model, m.input_tokens, m.output_tokens, m.cache_read,
+                      m.cache_write_5m, m.cache_write_1h, m.reasoning_tokens, m.est_cost_usd
+                FROM messages m JOIN sessions s ON s.id = m.session_id
+                {where}
+                ORDER BY m.ts""",
+            params).fetchall()]
         mcp = [dict(r) for r in c.execute(
-            "SELECT ts, server, tool_name, result_chars, est_result_tokens, is_error FROM mcp_calls WHERE session_id=? ORDER BY ts",
-            (session_id,)).fetchall()]
-    return {"session": dict(row), "messages": msgs, "mcp_calls": mcp}
+            """SELECT ts, server, tool_name, result_chars, est_result_tokens, is_error
+               FROM mcp_calls
+               WHERE session_id=?
+                 AND (? IS NULL OR ts >= ?)
+                 AND (? IS NULL OR ts <= ?)
+               ORDER BY ts""",
+            (session_id, start, start, end, end)).fetchall()]
+    session = dict(base)
+    if row:
+        session.update(dict(row))
+    else:
+        session.update({
+            "started_at": None,
+            "ended_at": None,
+            "msg_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "reasoning_tokens": 0,
+            "est_cost_usd": 0,
+        })
+    return {"session": session, "messages": msgs, "mcp_calls": mcp}
 
 
 def _per_call_lifecycle_cost(tokens: int, tool: str, model: str | None, subsequent_msgs: int) -> float:

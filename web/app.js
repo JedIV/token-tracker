@@ -464,7 +464,7 @@ async function showMcpServer(server, toolName) {
 // loadSessions removed — sessions are now one of the breakdown toggles.
 
 async function showSession(id) {
-  const d = await api("/api/session/" + encodeURIComponent(id));
+  const d = await api("/api/session/" + encodeURIComponent(id) + queryString());
   const s = d.session;
   $("#sd-title").textContent = `${s.tool} · ${s.model || "?"} · ${fmt.pathTail(s.cwd || "", 70)}`;
   const head = `
