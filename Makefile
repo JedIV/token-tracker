@@ -1,4 +1,8 @@
-.PHONY: ingest server agent up down logs
+.PHONY: setup ingest server agent up down logs
+
+setup:
+	uv sync
+	uv run pip install -e .
 
 ingest:
 	.venv/bin/python -m tracker.ingest -v
