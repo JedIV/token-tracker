@@ -21,10 +21,11 @@ input from cached input so the two tools line up on the same axes.
 
 ## Quick start
 
+Requires [uv](https://docs.astral.sh/uv/).
+
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/python -m tracker.ingest -v     # first run
+uv sync                                   # create .venv + install deps
+uv run python -m tracker.ingest -v        # first run
 ./scripts/run-server.sh                   # http://127.0.0.1:8732
 ```
 
