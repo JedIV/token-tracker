@@ -66,6 +66,52 @@ function bucketLabel(bucket, granularity) {
   }
 }
 
+function bucketKey(d, granularity) {
+  const iso = d.toISOString();
+  switch (granularity) {
+    case "minute": return iso.slice(0, 16);
+    case "hour":   return iso.slice(0, 13);
+    case "day":    return iso.slice(0, 10);
+    default: return null;
+  }
+}
+
+function bucketStepMs(granularity) {
+  switch (granularity) {
+    case "minute": return 60_000;
+    case "hour":   return 3_600_000;
+    case "day":    return 86_400_000;
+    default: return 0;
+  }
+}
+
+// Fill in zero-valued rows for empty buckets between min and max so the x-axis
+// is uniform in time. Without this, idle gaps collapse and adjacent labels can
+// span very different real-world durations.
+function fillEmptyBuckets(rows, granularity, zeroFields) {
+  const step = bucketStepMs(granularity);
+  if (!step || rows.length < 2) return rows;
+  const startMs = bucketParts(rows[0].bucket, granularity).getTime();
+  const endMs = bucketParts(rows[rows.length - 1].bucket, granularity).getTime();
+  if (!isFinite(startMs) || !isFinite(endMs)) return rows;
+  const span = Math.floor((endMs - startMs) / step) + 1;
+  if (span > 5000) return rows; // safety cap
+  const byBucket = new Map(rows.map(r => [r.bucket, r]));
+  const out = [];
+  for (let t = startMs; t <= endMs; t += step) {
+    const key = bucketKey(new Date(t), granularity);
+    const existing = byBucket.get(key);
+    if (existing) {
+      out.push(existing);
+    } else {
+      const z = { bucket: key };
+      for (const f of zeroFields) z[f] = 0;
+      out.push(z);
+    }
+  }
+  return out;
+}
+
 function bucketTooltipTitle(bucket, granularity) {
   const d = bucketParts(bucket, granularity);
   if (isNaN(d.getTime())) return bucket;
@@ -175,6 +221,9 @@ function renderCharts(daily, granularity) {
     $("#gran-label").textContent = "· charts unavailable";
     return;
   }
+  daily = fillEmptyBuckets(daily, granularity, [
+    "input_tokens", "output_tokens", "cache_hit", "cache_write_5m", "cache_write_1h", "cost_usd",
+  ]);
   const buckets = daily.map(d => d.bucket);
   const labels = buckets.map(b => bucketLabel(b, granularity));
   $("#gran-label").textContent = `· bucket: ${granularity} · ${daily.length} points`;
@@ -285,8 +334,14 @@ async function renderBreakdownChart(group) {
       return;
     }
 
-    const labels = d.buckets.map(b => bucketLabel(b, d.granularity));
-    const buckets = d.buckets;
+    const filledRows = fillEmptyBuckets(d.buckets.map(b => ({ bucket: b })), d.granularity, []);
+    const buckets = filledRows.map(r => r.bucket);
+    const labels = buckets.map(b => bucketLabel(b, d.granularity));
+    const pointByBucket = new Map();
+    for (const s of d.series) {
+      const m = new Map(s.points.map(p => [p.bucket, p.cost_usd]));
+      pointByBucket.set(s.label, m);
+    }
     const palette = ["#ffd479", "#7cc4ff", "#7fe6a8", "#ff9bb3", "#c9a4ff"];
     breakdownChart = new Chart(canvas, {
       type: "line",
@@ -294,7 +349,7 @@ async function renderBreakdownChart(group) {
         labels,
         datasets: d.series.map((s, i) => ({
           label: fmt.pathTail(s.label, 58),
-          data: s.points.map(p => p.cost_usd),
+          data: buckets.map(b => pointByBucket.get(s.label).get(b) ?? 0),
           borderColor: palette[i % palette.length],
           backgroundColor: palette[i % palette.length],
           tension: 0.25,
