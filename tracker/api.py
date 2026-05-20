@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .db import DEFAULT_DB_PATH, connect, init
 from .ingest import run as run_ingest
-from .pricing import _lookup as _price_lookup
+from .pricing import _lookup as _price_lookup, reload as _price_reload
 from .recompute_costs import run as run_recompute
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -146,6 +146,27 @@ def stats(
                   COALESCE(SUM(m.est_cost_usd),0)   AS cost_usd
                 {join}""", params).fetchone()
         totals = dict(totals_row)
+
+        # Cost breakdown by bucket. Group tokens by (tool, model), apply per-bucket rates,
+        # then sum. Lets the UI show "where the $ went" (cache reads almost always dominate).
+        by_tm = c.execute(
+            f"""SELECT m.tool, m.model,
+                       SUM(m.input_tokens)   AS in_tok,
+                       SUM(m.output_tokens)  AS out_tok,
+                       SUM(m.cache_read)     AS cr_tok,
+                       SUM(m.cache_write_5m) AS cw5_tok,
+                       SUM(m.cache_write_1h) AS cw1_tok
+                {join}
+                GROUP BY m.tool, m.model""", params).fetchall()
+        cb = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write_5m": 0.0, "cache_write_1h": 0.0}
+        for r in by_tm:
+            p = _price_lookup(r["tool"], r["model"])
+            cb["input"]          += (r["in_tok"]  or 0) * p.get("input", 0) / 1_000_000
+            cb["output"]         += (r["out_tok"] or 0) * p.get("output", 0) / 1_000_000
+            cb["cache_read"]     += (r["cr_tok"]  or 0) * p.get("cache_read", 0) / 1_000_000
+            cb["cache_write_5m"] += (r["cw5_tok"] or 0) * p.get("cache_write_5m", 0) / 1_000_000
+            cb["cache_write_1h"] += (r["cw1_tok"] or 0) * p.get("cache_write_1h", 0) / 1_000_000
+        totals["cost_breakdown"] = {k: round(v, 4) for k, v in cb.items()}
 
         # Active hours: sum over sessions of (max(ts) - min(ts)) within the filter window.
         # This excludes pure idle gaps between sessions and gives a more meaningful rate.

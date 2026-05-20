@@ -176,11 +176,18 @@ function renderCards(totals) {
   const freshTokens = tokens_in + tokens_out + tokens_cw5 + tokens_cw1;
   const allTokens = freshTokens + tokens_hit;
   const cacheShare = allTokens ? tokens_hit / allTokens : 0;
+  const cb = totals.cost_breakdown || {};
+  const cwTotal = (cb.cache_write_5m || 0) + (cb.cache_write_1h || 0);
+  const pct = (v) => cost ? Math.round((v / cost) * 100) + "%" : "—";
   const cards = [
     { label: "est cost", value: fmt.usd(cost), accent: true },
     { label: "$ / active hour", value: fmt.usd(cph), accent: true, sub: "Σ session spans" },
+    { label: "cost: cache read", value: fmt.usd(cb.cache_read), sub: pct(cb.cache_read || 0) + " of total" },
+    { label: "cost: cache write", value: fmt.usd(cwTotal), sub: pct(cwTotal) + " of total · 5m+1h" },
+    { label: "cost: output", value: fmt.usd(cb.output), sub: pct(cb.output || 0) + " of total · incl reasoning" },
+    { label: "cost: fresh input", value: fmt.usd(cb.input), sub: pct(cb.input || 0) + " of total" },
+    { label: "cache share (tokens)", value: Math.round(cacheShare * 100) + "%", sub: fmt.n(tokens_hit) + " cache hits" },
     { label: "fresh + output tokens", value: fmt.short(freshTokens), sub: fmt.n(freshTokens) },
-    { label: "cache share", value: Math.round(cacheShare * 100) + "%", sub: fmt.n(tokens_hit) + " cache hits" },
     { label: "sessions", value: fmt.n(totals.sessions) },
     { label: "messages", value: fmt.n(totals.msgs) },
     { label: "active hours", value: ah < 1 ? ah.toFixed(2) : ah.toFixed(1) },
