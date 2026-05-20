@@ -259,7 +259,9 @@ def breakdown_series(
         if tool:
             clauses.append("mc.tool = ?"); params.append(tool)
         if model:
-            clauses.append("s.model = ?"); params.append(model)
+            clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                           "AND mm.source_line=mc.source_line AND mm.model = ?)")
+            params.append(model)
         if project:
             clauses.append("s.cwd = ?"); params.append(project)
         if start:
@@ -490,6 +492,7 @@ def _per_call_lifecycle_cost(tokens: int, tool: str, model: str | None, subseque
 @app.get("/api/mcp")
 def mcp(
     tool: str | None = Query(None),
+    model: str | None = Query(None),
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
@@ -501,6 +504,11 @@ def mcp(
     params: list = []
     if tool:
         clauses.append("mc.tool = ?"); params.append(tool)
+    if model:
+        # An MCP call is issued by the assistant message at the same source_file/source_line.
+        clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                       "AND mm.source_line=mc.source_line AND mm.model = ?)")
+        params.append(model)
     if project:
         clauses.append("s.cwd = ?"); params.append(project)
     if start:

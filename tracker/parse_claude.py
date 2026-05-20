@@ -101,13 +101,22 @@ def _tool_result_chars(content) -> tuple[int, int]:
     return len(json.dumps(content, default=str)), 0
 
 
+def _session_uuid_for(path: Path) -> str:
+    """Sub-agent JSONLs live at <project>/<parent-session-uuid>/subagents/agent-*.jsonl
+    and must roll up into the parent session. Top-level files use their own stem.
+    """
+    if path.parent.name == "subagents":
+        return path.parent.parent.name
+    return path.stem
+
+
 def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
     """Parse from byte offset; returns (parsed, new_offset).
 
     new_offset is the byte position AFTER the last fully-parsed line. If a
     trailing partial line exists, we stop before it so the next run picks it up.
     """
-    session_uuid = path.stem
+    session_uuid = _session_uuid_for(path)
     session_id = f"claude:{session_uuid}"
     meta = SessionMeta(
         session_id=session_id,
@@ -244,4 +253,7 @@ def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
 def discover_files() -> list[Path]:
     if not CLAUDE_ROOT.exists():
         return []
-    return sorted(CLAUDE_ROOT.glob("*/*.jsonl"))
+    top = CLAUDE_ROOT.glob("*/*.jsonl")
+    # Sub-agent (Task tool) sessions are written to <project>/<sessionId>/subagents/agent-*.jsonl.
+    sub = CLAUDE_ROOT.glob("*/*/subagents/agent-*.jsonl")
+    return sorted({*top, *sub})
