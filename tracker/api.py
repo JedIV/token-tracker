@@ -239,9 +239,12 @@ def stats(
                 GROUP BY m.model, m.tool
                 ORDER BY cost_usd DESC""", params).fetchall()]
 
-        # by agent type (sub-agents). NULL agent_type = main session turns.
+        # by agent INVOCATION (one row per sub-agent run, identified by agent_id).
+        # All main-session turns (agent_type IS NULL) collapse into a single aggregate row.
         by_agent = [dict(r) for r in c.execute(
-            f"""SELECT COALESCE(m.agent_type,'main session') AS agent,
+            f"""SELECT COALESCE(m.agent_type,'main session') AS agent_type,
+                       m.agent_id,
+                       m.agent_desc,
                        COUNT(*) msgs,
                        COUNT(DISTINCT m.session_id) sessions,
                        SUM(m.input_tokens) input_tokens,
@@ -251,7 +254,7 @@ def stats(
                        SUM(m.cache_write_1h) cache_write_1h,
                        SUM(m.est_cost_usd) cost_usd
                 {join}
-                GROUP BY m.agent_type
+                GROUP BY m.agent_type, m.agent_id, m.agent_desc
                 ORDER BY cost_usd DESC""", params).fetchall()]
 
         # by project
@@ -367,8 +370,12 @@ def breakdown_series(
                   "COALESCE(m.model,'(unknown)') || ' · ' || m.tool"),
         "project": ("COALESCE(s.cwd,'(unknown)')", "COALESCE(s.cwd,'(unknown)')"),
         "session": ("s.id", "s.tool || ' · ' || COALESCE(s.cwd, s.id)"),
-        "agent": ("COALESCE(m.agent_type,'main session')",
-                  "COALESCE(m.agent_type,'main session')"),
+        "agent": (
+            "COALESCE(m.agent_id, COALESCE(m.agent_type,'main session'))",
+            "CASE WHEN m.agent_id IS NULL THEN COALESCE(m.agent_type,'main session') "
+            "     ELSE COALESCE(m.agent_type,'') || ' · ' || substr(m.agent_id,1,8) || "
+            "          ' · ' || COALESCE(m.agent_desc,'(no description)') END",
+        ),
     }
     key_expr, label_expr = group_exprs[group]
     bucket = _GRANULARITY[gran]
@@ -503,7 +510,7 @@ def session_detail(
         msgs = [dict(r) for r in c.execute(
             f"""SELECT m.ts, m.model, m.input_tokens, m.output_tokens, m.cache_read,
                       m.cache_write_5m, m.cache_write_1h, m.reasoning_tokens, m.est_cost_usd,
-                      m.agent_type, m.agent_desc
+                      m.agent_type, m.agent_desc, m.agent_id
                 FROM messages m JOIN sessions s ON s.id = m.session_id
                 {where}
                 ORDER BY m.ts""",

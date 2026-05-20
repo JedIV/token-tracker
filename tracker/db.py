@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
     source_line     INTEGER NOT NULL,
     agent_type      TEXT,                    -- e.g. 'Explore', 'Plan' for sub-agents; NULL for the main session
     agent_desc      TEXT,                    -- per-invocation description from the meta.json sidecar
+    agent_id        TEXT,                    -- per-invocation hash from the JSONL filename (the sub-agent "PID")
     UNIQUE(source_file, source_line)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -108,6 +109,8 @@ def init(db_path: Path | str = DEFAULT_DB_PATH) -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN agent_type TEXT")
         if "agent_desc" not in existing:
             conn.execute("ALTER TABLE messages ADD COLUMN agent_desc TEXT")
+        if "agent_id" not in existing:
+            conn.execute("ALTER TABLE messages ADD COLUMN agent_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_agent_type ON messages(agent_type)")
         conn.commit()
     finally:

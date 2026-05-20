@@ -181,26 +181,28 @@ function renderCards(totals) {
   const cb = totals.cost_breakdown || {};
   const cwTotal = (cb.cache_write_5m || 0) + (cb.cache_write_1h || 0);
   const pct = (v) => cost ? Math.round((v / cost) * 100) + "%" : "—";
-  const cards = [
+  const overview = [
     { label: "est cost", value: fmt.usd(cost), accent: true },
     { label: "$ / active hour", value: fmt.usd(cph), accent: true, sub: "Σ session spans" },
-    { label: "cost: cache read", value: fmt.usd(cb.cache_read), sub: pct(cb.cache_read || 0) + " of total" },
-    { label: "cost: cache write", value: fmt.usd(cwTotal), sub: pct(cwTotal) + " of total · 5m+1h" },
-    { label: "cost: output", value: fmt.usd(cb.output), sub: pct(cb.output || 0) + " of total · incl reasoning" },
-    { label: "cost: fresh input", value: fmt.usd(cb.input), sub: pct(cb.input || 0) + " of total" },
-    { label: "cache share (tokens)", value: Math.round(cacheShare * 100) + "%", sub: fmt.n(tokens_hit) + " cache hits" },
-    { label: "fresh + output tokens", value: fmt.short(freshTokens), sub: fmt.n(freshTokens) },
     { label: "sessions", value: fmt.n(totals.sessions) },
     { label: "messages", value: fmt.n(totals.msgs) },
     { label: "active hours", value: ah < 1 ? ah.toFixed(2) : ah.toFixed(1) },
-    { label: "cache writes", value: fmt.short(tokens_cw5 + tokens_cw1), sub: fmt.n(tokens_cw5 + tokens_cw1) },
+    { label: "cache share (tok)", value: Math.round(cacheShare * 100) + "%", sub: fmt.short(tokens_hit) + " hits" },
   ];
-  $("#cards").innerHTML = cards.map(c => `
-    <div class="card ${c.accent ? "accent" : ""}">
+  const breakdown = [
+    { label: "cache read", value: fmt.usd(cb.cache_read), sub: pct(cb.cache_read || 0) + " of total" },
+    { label: "cache write", value: fmt.usd(cwTotal), sub: pct(cwTotal) + " · 5m+1h" },
+    { label: "output", value: fmt.usd(cb.output), sub: pct(cb.output || 0) + " · incl reasoning" },
+    { label: "fresh input", value: fmt.usd(cb.input), sub: pct(cb.input || 0) + " of total" },
+  ];
+  const renderCard = (c) => `
+    <div class="card ${c.accent ? "accent" : ""}" title="${c.label}: ${c.value}${c.sub ? " (" + c.sub + ")" : ""}">
       <div class="label">${c.label}</div>
       <div class="value">${c.value}</div>
       ${c.sub ? `<div class="sub">${c.sub}</div>` : ""}
-    </div>`).join("");
+    </div>`;
+  $("#cards-overview").innerHTML = overview.map(renderCard).join("");
+  $("#cards-breakdown").innerHTML = breakdown.map(renderCard).join("");
 }
 
 const chartFontColor = "#9aa1ad";
@@ -476,8 +478,9 @@ const BREAKDOWN_COLS = {
     { key: "cost_usd", label: "cost", num: true, fmt: fmt.usd, css: "cost" },
   ],
   agent: [
-    { key: "agent", label: "agent" },
-    { key: "sessions", label: "sessions", num: true, fmt: fmt.n },
+    { key: "agent_type", label: "agent" },
+    { key: "agent_id", label: "id", css: "dim", fmt: (v) => v ? v.slice(0, 8) : "—" },
+    { key: "agent_desc", label: "task", fmt: (v) => v ? fmt.pathTail(v, 60) : "—" },
     { key: "msgs", label: "msgs", num: true, fmt: fmt.n },
     { key: "input_tokens", label: "input", num: true, fmt: fmt.n },
     { key: "output_tokens", label: "output", num: true, fmt: fmt.n },
@@ -535,7 +538,7 @@ async function loadBreakdown() {
          : g === "project" ? d.by_project
          : d.by_agent;
     ctrls.innerHTML = "";
-    hint.textContent = g === "agent" ? "main session = your top-level Claude Code conversation; everything else is a Task sub-agent" : "";
+    hint.textContent = g === "agent" ? "one row per sub-agent invocation; 'main session' aggregates all top-level turns" : "";
   } else if (g === "session") {
     const sort = STATE.sessSort || "cost";
     const d = await api("/api/sessions" + queryString({ sort, limit: 200 }));
@@ -654,7 +657,12 @@ async function showSession(id) {
   const mtable = `<table>${tableHTML([
     { key: "ts", label: "time", fmt: fmt.date, css: "dim" },
     { key: "model", label: "model", css: "dim" },
-    { key: "agent_type", label: "agent", css: "dim", fmt: (v, r) => v ? `${v}${r.agent_desc ? " · " + fmt.pathTail(r.agent_desc, 28) : ""}` : "main" },
+    { key: "agent_type", label: "agent", css: "dim", fmt: (v, r) => {
+        if (!v) return "main";
+        const id = r.agent_id ? ` <span style="color:var(--accent)">#${r.agent_id.slice(0,8)}</span>` : "";
+        const desc = r.agent_desc ? ` · ${fmt.pathTail(r.agent_desc, 36)}` : "";
+        return `${v}${id}${desc}`;
+      } },
     { key: "input_tokens", label: "input", num: true, fmt: fmt.n },
     { key: "output_tokens", label: "output", num: true, fmt: fmt.n },
     { key: "cache_read", label: "cache hit (read)", num: true, fmt: fmt.n },

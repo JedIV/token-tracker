@@ -36,6 +36,7 @@ class MessageRow:
     source_line: int
     agent_type: str | None = None
     agent_desc: str | None = None
+    agent_id: str | None = None
 
 
 @dataclass
@@ -135,6 +136,8 @@ def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
     session_uuid = _session_uuid_for(path)
     session_id = f"claude:{session_uuid}"
     agent_type, agent_desc = _agent_meta(path)
+    # Sub-agent JSONLs are named agent-<id>.jsonl; the id uniquely identifies one invocation.
+    agent_id = path.stem[len("agent-"):] if path.parent.name == "subagents" and path.stem.startswith("agent-") else None
     meta = SessionMeta(
         session_id=session_id,
         tool="claude",
@@ -222,6 +225,7 @@ def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
                 source_line=line_no,
                 agent_type=agent_type,
                 agent_desc=agent_desc,
+                agent_id=agent_id,
             )
             # Some Claude records put cache_write under cache_creation_input_tokens with no split.
             if row.cache_write_5m == 0 and row.cache_write_1h == 0:

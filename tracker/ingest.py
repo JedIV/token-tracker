@@ -80,20 +80,23 @@ def _insert_messages(conn: sqlite3.Connection, rows) -> int:
             """INSERT OR IGNORE INTO messages
                (session_id, tool, ts, model, input_tokens, output_tokens, cache_read,
                 cache_write_5m, cache_write_1h, reasoning_tokens, est_cost_usd,
-                source_file, source_line, agent_type, agent_desc)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                source_file, source_line, agent_type, agent_desc, agent_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (r.session_id, r.tool, r.ts, r.model, r.input_tokens, r.output_tokens,
              r.cache_read, r.cache_write_5m, r.cache_write_1h, r.reasoning_tokens, cost,
              r.source_file, r.source_line,
-             getattr(r, "agent_type", None), getattr(r, "agent_desc", None)),
+             getattr(r, "agent_type", None), getattr(r, "agent_desc", None),
+             getattr(r, "agent_id", None)),
         )
         added += cur.rowcount
         # Existing rows (already-ingested sub-agent files) won't be re-inserted; backfill the agent tags.
-        if cur.rowcount == 0 and getattr(r, "agent_type", None):
+        if cur.rowcount == 0 and (getattr(r, "agent_type", None) or getattr(r, "agent_id", None)):
             conn.execute(
-                """UPDATE messages SET agent_type=?, agent_desc=?
-                   WHERE source_file=? AND source_line=? AND (agent_type IS NULL OR agent_desc IS NULL)""",
-                (r.agent_type, r.agent_desc, r.source_file, r.source_line),
+                """UPDATE messages SET agent_type=COALESCE(agent_type,?),
+                                       agent_desc=COALESCE(agent_desc,?),
+                                       agent_id=COALESCE(agent_id,?)
+                   WHERE source_file=? AND source_line=?""",
+                (r.agent_type, r.agent_desc, r.agent_id, r.source_file, r.source_line),
             )
     return added
 
@@ -194,12 +197,15 @@ def run(db_path: Path | str = DEFAULT_DB_PATH, *, verbose: bool = False) -> dict
             except (json.JSONDecodeError, OSError):
                 continue
             atype, adesc = m.get("agentType"), m.get("description")
-            if not atype and not adesc:
+            aid = sub_path.stem[len("agent-"):] if sub_path.stem.startswith("agent-") else None
+            if not atype and not adesc and not aid:
                 continue
             conn.execute(
-                """UPDATE messages SET agent_type=COALESCE(agent_type, ?), agent_desc=COALESCE(agent_desc, ?)
-                   WHERE source_file=? AND (agent_type IS NULL OR agent_desc IS NULL)""",
-                (atype, adesc, str(sub_path)),
+                """UPDATE messages SET agent_type=COALESCE(agent_type, ?),
+                                       agent_desc=COALESCE(agent_desc, ?),
+                                       agent_id=COALESCE(agent_id, ?)
+                   WHERE source_file=? AND (agent_type IS NULL OR agent_desc IS NULL OR agent_id IS NULL)""",
+                (atype, adesc, aid, str(sub_path)),
             )
 
         for path in parse_claude.discover_files():

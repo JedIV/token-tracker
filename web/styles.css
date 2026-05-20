@@ -69,15 +69,32 @@ header {
   gap: 1px;
   background: var(--border);
   margin: 0;
+}
+/* --locked: never wrap; cards shrink uniformly to fit one row. */
+.cards--locked {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-template-columns: none;
+}
+.card-group {
   border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.card-group-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-mute);
+  padding: 8px 14px 0;
 }
 .card {
   background: var(--panel);
-  padding: 14px 18px;
+  padding: 10px 14px;
+  min-width: 0; /* let grid shrink below content width */
 }
-.card .label { color: var(--text-mute); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
-.card .value { font-size: 20px; margin-top: 4px; color: var(--text); }
-.card .sub { color: var(--text-dim); font-size: 11px; margin-top: 2px; }
+.card .label { color: var(--text-mute); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .value { font-size: 17px; margin-top: 2px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .sub { color: var(--text-dim); font-size: 10px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card.accent .value { color: var(--accent-2); }
 
 .panel {
