@@ -126,7 +126,7 @@ function bucketTooltipTitle(bucket, granularity) {
   }
 }
 
-const STATE = { filters: { tool: "", model: "", project: "", agent: "", start: "", end: "", granularity: "auto" } };
+const STATE = { filters: { tool: "", model: "", project: "", agent: "", entrypoint: "", start: "", end: "", granularity: "auto" } };
 let usageChart, costChart, breakdownChart;
 
 async function api(path, opts) {
@@ -160,6 +160,7 @@ async function loadFilters() {
   fillSelect($("#f-project"), d.projects, STATE.filters.project);
   // agent dropdown: "main" pseudo-value selects top-level (non-sub-agent) turns only.
   fillSelect($("#f-agent"), ["main", ...(d.agents || [])], STATE.filters.agent);
+  fillSelect($("#f-entrypoint"), d.entrypoints || [], STATE.filters.entrypoint);
   if (d.date_range.min) {
     $("#f-start").min = d.date_range.min.slice(0, 10);
     $("#f-end").max = d.date_range.max.slice(0, 10);
@@ -477,6 +478,17 @@ const BREAKDOWN_COLS = {
     { key: "cache_write_1h", label: "write 1h", num: true, fmt: fmt.n },
     { key: "cost_usd", label: "cost", num: true, fmt: fmt.usd, css: "cost" },
   ],
+  entrypoint: [
+    { key: "entrypoint", label: "entrypoint" },
+    { key: "sessions", label: "sessions", num: true, fmt: fmt.n },
+    { key: "msgs", label: "msgs", num: true, fmt: fmt.n },
+    { key: "input_tokens", label: "input", num: true, fmt: fmt.n },
+    { key: "output_tokens", label: "output", num: true, fmt: fmt.n },
+    { key: "cache_hit", label: "cache hits", num: true, fmt: fmt.n },
+    { key: "cache_write_5m", label: "write 5m", num: true, fmt: fmt.n },
+    { key: "cache_write_1h", label: "write 1h", num: true, fmt: fmt.n },
+    { key: "cost_usd", label: "cost", num: true, fmt: fmt.usd, css: "cost" },
+  ],
   agent: [
     { key: "agent_type", label: "agent" },
     { key: "agent_id", label: "id", css: "dim", fmt: (v) => v ? v.slice(0, 8) : "—" },
@@ -491,6 +503,7 @@ const BREAKDOWN_COLS = {
   ],
   session: [
     { key: "tool", label: "tool" },
+    { key: "entrypoint", label: "entrypoint", css: "dim", fmt: (v) => v || "—" },
     { key: "model", label: "model", css: "dim" },
     { key: "cwd", label: "project", fmt: (v) => fmt.pathTail(v, 50) },
     { key: "msg_count", label: "msgs", num: true, fmt: fmt.n },
@@ -531,14 +544,17 @@ async function loadBreakdown() {
   let rows = [];
   let clickFn = null;
 
-  if (g === "tool" || g === "model" || g === "project" || g === "agent") {
+  if (g === "tool" || g === "model" || g === "project" || g === "agent" || g === "entrypoint") {
     const d = STATE.statsCache || await api("/api/stats" + queryString());
     rows = g === "tool" ? d.by_tool
          : g === "model" ? d.by_model
          : g === "project" ? d.by_project
+         : g === "entrypoint" ? d.by_entrypoint
          : d.by_agent;
     ctrls.innerHTML = "";
-    hint.textContent = g === "agent" ? "one row per sub-agent invocation; 'main session' aggregates all top-level turns" : "";
+    hint.textContent = g === "agent" ? "one row per sub-agent invocation; 'main session' aggregates all top-level turns"
+                     : g === "entrypoint" ? "'cli' = interactive REPL; 'sdk-cli' = spawned via the Claude Code SDK; 'codex' = OpenAI CLI"
+                     : "";
   } else if (g === "session") {
     const sort = STATE.sessSort || "cost";
     const d = await api("/api/sessions" + queryString({ sort, limit: 200 }));
@@ -700,6 +716,7 @@ function readFilters() {
   STATE.filters.model = $("#f-model").value;
   STATE.filters.project = $("#f-project").value;
   STATE.filters.agent = $("#f-agent").value;
+  STATE.filters.entrypoint = $("#f-entrypoint").value;
   // start/end may already be ISO strings from quick-range presets; fall back to the date inputs.
   if (!STATE.filters._rangePreset) {
     STATE.filters.start = $("#f-start").value ? $("#f-start").value + "T00:00:00Z" : "";
@@ -762,6 +779,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#reset").addEventListener("click", () => {
     $("#f-tool").value = ""; $("#f-model").value = ""; $("#f-project").value = "";
     $("#f-agent").value = "";
+    $("#f-entrypoint").value = "";
     $("#f-start").value = ""; $("#f-end").value = "";
     $("#f-granularity").value = "auto";
     $$(".btn.range").forEach(b => b.classList.remove("active"));

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_uuid    TEXT NOT NULL,
     cwd             TEXT,
     model           TEXT,                    -- last model observed in session
+    entrypoint      TEXT,                    -- 'cli' (interactive), 'sdk-cli', 'codex', ... — how the run was launched
     started_at      TEXT,
     ended_at        TEXT,
     msg_count       INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +113,10 @@ def init(db_path: Path | str = DEFAULT_DB_PATH) -> None:
         if "agent_id" not in existing:
             conn.execute("ALTER TABLE messages ADD COLUMN agent_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_agent_type ON messages(agent_type)")
+        existing_s = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "entrypoint" not in existing_s:
+            conn.execute("ALTER TABLE sessions ADD COLUMN entrypoint TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_entrypoint ON sessions(entrypoint)")
         conn.commit()
     finally:
         conn.close()

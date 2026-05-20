@@ -62,6 +62,7 @@ class SessionMeta:
     model: str | None
     started_at: str | None
     ended_at: str | None
+    entrypoint: str | None = None  # 'cli' (interactive REPL), 'sdk-cli' (programmatic), …
 
 
 @dataclass
@@ -195,6 +196,9 @@ def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
         cwd = d.get("cwd")
         if cwd and not meta.cwd:
             meta.cwd = cwd
+        ep = d.get("entrypoint")
+        if ep and not meta.entrypoint:
+            meta.entrypoint = ep
         if ts:
             if meta.started_at is None or ts < meta.started_at:
                 meta.started_at = ts

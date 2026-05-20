@@ -48,17 +48,18 @@ def _put_state(conn: sqlite3.Connection, path: Path, offset: int, mtime: float, 
 
 def _upsert_session(conn: sqlite3.Connection, meta) -> None:
     conn.execute(
-        """INSERT INTO sessions(id, tool, session_uuid, cwd, model, started_at, ended_at)
-           VALUES(?,?,?,?,?,?,?)
+        """INSERT INTO sessions(id, tool, session_uuid, cwd, model, entrypoint, started_at, ended_at)
+           VALUES(?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET
-             cwd       = COALESCE(excluded.cwd, sessions.cwd),
-             model     = COALESCE(excluded.model, sessions.model),
-             started_at= CASE WHEN sessions.started_at IS NULL OR excluded.started_at<sessions.started_at
-                              THEN excluded.started_at ELSE sessions.started_at END,
-             ended_at  = CASE WHEN sessions.ended_at IS NULL OR excluded.ended_at>sessions.ended_at
-                              THEN excluded.ended_at ELSE sessions.ended_at END""",
+             cwd        = COALESCE(excluded.cwd, sessions.cwd),
+             model      = COALESCE(excluded.model, sessions.model),
+             entrypoint = COALESCE(excluded.entrypoint, sessions.entrypoint),
+             started_at = CASE WHEN sessions.started_at IS NULL OR excluded.started_at<sessions.started_at
+                               THEN excluded.started_at ELSE sessions.started_at END,
+             ended_at   = CASE WHEN sessions.ended_at IS NULL OR excluded.ended_at>sessions.ended_at
+                               THEN excluded.ended_at ELSE sessions.ended_at END""",
         (meta.session_id, meta.tool, meta.session_uuid, meta.cwd, meta.model,
-         meta.started_at, meta.ended_at),
+         getattr(meta, "entrypoint", None), meta.started_at, meta.ended_at),
     )
 
 
@@ -186,6 +187,34 @@ def run(db_path: Path | str = DEFAULT_DB_PATH, *, verbose: bool = False) -> dict
     error = None
 
     try:
+        # One-shot backfill: codex sessions and any claude session that pre-dates entrypoint capture.
+        conn.execute("UPDATE sessions SET entrypoint='codex' WHERE tool='codex' AND entrypoint IS NULL")
+        for sid, in conn.execute(
+            "SELECT id FROM sessions WHERE tool='claude' AND entrypoint IS NULL"
+        ).fetchall():
+            row = conn.execute(
+                "SELECT source_file FROM messages WHERE session_id=? LIMIT 1", (sid,)
+            ).fetchone()
+            if not row:
+                continue
+            ep = None
+            try:
+                with open(row["source_file"]) as f:
+                    for i, line in enumerate(f):
+                        if i > 30:
+                            break
+                        try:
+                            d = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if d.get("entrypoint"):
+                            ep = d["entrypoint"]
+                            break
+            except OSError:
+                continue
+            if ep:
+                conn.execute("UPDATE sessions SET entrypoint=? WHERE id=?", (ep, sid))
+
         # One-shot backfill: tag messages from sub-agent files whose meta sidecar exists
         # but whose rows were ingested before agent_type was tracked. Cheap (one UPDATE per file).
         for sub_path in parse_claude.CLAUDE_ROOT.glob("*/*/subagents/agent-*.jsonl") if parse_claude.CLAUDE_ROOT.exists() else []:
