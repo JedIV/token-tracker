@@ -10,6 +10,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import json
+
 from . import parse_claude, parse_codex
 from .db import DEFAULT_DB_PATH, connect, init
 from .pricing import cost_usd
@@ -78,13 +80,21 @@ def _insert_messages(conn: sqlite3.Connection, rows) -> int:
             """INSERT OR IGNORE INTO messages
                (session_id, tool, ts, model, input_tokens, output_tokens, cache_read,
                 cache_write_5m, cache_write_1h, reasoning_tokens, est_cost_usd,
-                source_file, source_line)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                source_file, source_line, agent_type, agent_desc)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (r.session_id, r.tool, r.ts, r.model, r.input_tokens, r.output_tokens,
              r.cache_read, r.cache_write_5m, r.cache_write_1h, r.reasoning_tokens, cost,
-             r.source_file, r.source_line),
+             r.source_file, r.source_line,
+             getattr(r, "agent_type", None), getattr(r, "agent_desc", None)),
         )
         added += cur.rowcount
+        # Existing rows (already-ingested sub-agent files) won't be re-inserted; backfill the agent tags.
+        if cur.rowcount == 0 and getattr(r, "agent_type", None):
+            conn.execute(
+                """UPDATE messages SET agent_type=?, agent_desc=?
+                   WHERE source_file=? AND source_line=? AND (agent_type IS NULL OR agent_desc IS NULL)""",
+                (r.agent_type, r.agent_desc, r.source_file, r.source_line),
+            )
     return added
 
 
@@ -173,6 +183,25 @@ def run(db_path: Path | str = DEFAULT_DB_PATH, *, verbose: bool = False) -> dict
     error = None
 
     try:
+        # One-shot backfill: tag messages from sub-agent files whose meta sidecar exists
+        # but whose rows were ingested before agent_type was tracked. Cheap (one UPDATE per file).
+        for sub_path in parse_claude.CLAUDE_ROOT.glob("*/*/subagents/agent-*.jsonl") if parse_claude.CLAUDE_ROOT.exists() else []:
+            meta_path = sub_path.with_suffix(".meta.json")
+            if not meta_path.exists():
+                continue
+            try:
+                m = json.loads(meta_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            atype, adesc = m.get("agentType"), m.get("description")
+            if not atype and not adesc:
+                continue
+            conn.execute(
+                """UPDATE messages SET agent_type=COALESCE(agent_type, ?), agent_desc=COALESCE(agent_desc, ?)
+                   WHERE source_file=? AND (agent_type IS NULL OR agent_desc IS NULL)""",
+                (atype, adesc, str(sub_path)),
+            )
+
         for path in parse_claude.discover_files():
             files_scanned += 1
             updated, ma, mc = _process_file(conn, path, parse_claude)

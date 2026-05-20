@@ -126,7 +126,7 @@ function bucketTooltipTitle(bucket, granularity) {
   }
 }
 
-const STATE = { filters: { tool: "", model: "", project: "", start: "", end: "", granularity: "auto" } };
+const STATE = { filters: { tool: "", model: "", project: "", agent: "", start: "", end: "", granularity: "auto" } };
 let usageChart, costChart, breakdownChart;
 
 async function api(path, opts) {
@@ -158,6 +158,8 @@ async function loadFilters() {
   fillSelect($("#f-tool"), d.tools, STATE.filters.tool);
   fillSelect($("#f-model"), d.models, STATE.filters.model);
   fillSelect($("#f-project"), d.projects, STATE.filters.project);
+  // agent dropdown: "main" pseudo-value selects top-level (non-sub-agent) turns only.
+  fillSelect($("#f-agent"), ["main", ...(d.agents || [])], STATE.filters.agent);
   if (d.date_range.min) {
     $("#f-start").min = d.date_range.min.slice(0, 10);
     $("#f-end").max = d.date_range.max.slice(0, 10);
@@ -324,6 +326,7 @@ function labelForGroupRow(group, r) {
   if (group === "tool") return r.tool;
   if (group === "model") return r.model;
   if (group === "project") return fmt.pathTail(r.project, 32);
+  if (group === "agent") return r.agent;
   if (group === "session") return `${r.tool} · ${fmt.pathTail(r.cwd || r.id, 28)}`;
   if (group === "server") return r.server;
   if (group === "mcp_tool") return `${r.server} · ${r.tool_name}`;
@@ -472,6 +475,17 @@ const BREAKDOWN_COLS = {
     { key: "cache_write_1h", label: "write 1h", num: true, fmt: fmt.n },
     { key: "cost_usd", label: "cost", num: true, fmt: fmt.usd, css: "cost" },
   ],
+  agent: [
+    { key: "agent", label: "agent" },
+    { key: "sessions", label: "sessions", num: true, fmt: fmt.n },
+    { key: "msgs", label: "msgs", num: true, fmt: fmt.n },
+    { key: "input_tokens", label: "input", num: true, fmt: fmt.n },
+    { key: "output_tokens", label: "output", num: true, fmt: fmt.n },
+    { key: "cache_hit", label: "cache hits", num: true, fmt: fmt.n },
+    { key: "cache_write_5m", label: "write 5m", num: true, fmt: fmt.n },
+    { key: "cache_write_1h", label: "write 1h", num: true, fmt: fmt.n },
+    { key: "cost_usd", label: "cost", num: true, fmt: fmt.usd, css: "cost" },
+  ],
   session: [
     { key: "tool", label: "tool" },
     { key: "model", label: "model", css: "dim" },
@@ -514,11 +528,14 @@ async function loadBreakdown() {
   let rows = [];
   let clickFn = null;
 
-  if (g === "tool" || g === "model" || g === "project") {
+  if (g === "tool" || g === "model" || g === "project" || g === "agent") {
     const d = STATE.statsCache || await api("/api/stats" + queryString());
-    rows = g === "tool" ? d.by_tool : g === "model" ? d.by_model : d.by_project;
+    rows = g === "tool" ? d.by_tool
+         : g === "model" ? d.by_model
+         : g === "project" ? d.by_project
+         : d.by_agent;
     ctrls.innerHTML = "";
-    hint.textContent = "";
+    hint.textContent = g === "agent" ? "main session = your top-level Claude Code conversation; everything else is a Task sub-agent" : "";
   } else if (g === "session") {
     const sort = STATE.sessSort || "cost";
     const d = await api("/api/sessions" + queryString({ sort, limit: 200 }));
@@ -637,6 +654,7 @@ async function showSession(id) {
   const mtable = `<table>${tableHTML([
     { key: "ts", label: "time", fmt: fmt.date, css: "dim" },
     { key: "model", label: "model", css: "dim" },
+    { key: "agent_type", label: "agent", css: "dim", fmt: (v, r) => v ? `${v}${r.agent_desc ? " · " + fmt.pathTail(r.agent_desc, 28) : ""}` : "main" },
     { key: "input_tokens", label: "input", num: true, fmt: fmt.n },
     { key: "output_tokens", label: "output", num: true, fmt: fmt.n },
     { key: "cache_read", label: "cache hit (read)", num: true, fmt: fmt.n },
@@ -673,6 +691,7 @@ function readFilters() {
   STATE.filters.tool = $("#f-tool").value;
   STATE.filters.model = $("#f-model").value;
   STATE.filters.project = $("#f-project").value;
+  STATE.filters.agent = $("#f-agent").value;
   // start/end may already be ISO strings from quick-range presets; fall back to the date inputs.
   if (!STATE.filters._rangePreset) {
     STATE.filters.start = $("#f-start").value ? $("#f-start").value + "T00:00:00Z" : "";
@@ -734,6 +753,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#apply").addEventListener("click", refresh);
   $("#reset").addEventListener("click", () => {
     $("#f-tool").value = ""; $("#f-model").value = ""; $("#f-project").value = "";
+    $("#f-agent").value = "";
     $("#f-start").value = ""; $("#f-end").value = "";
     $("#f-granularity").value = "auto";
     $$(".btn.range").forEach(b => b.classList.remove("active"));

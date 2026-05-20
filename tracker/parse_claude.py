@@ -34,6 +34,8 @@ class MessageRow:
     reasoning_tokens: int
     source_file: str
     source_line: int
+    agent_type: str | None = None
+    agent_desc: str | None = None
 
 
 @dataclass
@@ -110,6 +112,20 @@ def _session_uuid_for(path: Path) -> str:
     return path.stem
 
 
+def _agent_meta(path: Path) -> tuple[str | None, str | None]:
+    """For a sub-agent JSONL, read its sibling agent-*.meta.json to get (agentType, description)."""
+    if path.parent.name != "subagents":
+        return None, None
+    meta_path = path.with_suffix(".meta.json")
+    if not meta_path.exists():
+        return None, None
+    try:
+        m = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None, None
+    return m.get("agentType"), m.get("description")
+
+
 def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
     """Parse from byte offset; returns (parsed, new_offset).
 
@@ -118,6 +134,7 @@ def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
     """
     session_uuid = _session_uuid_for(path)
     session_id = f"claude:{session_uuid}"
+    agent_type, agent_desc = _agent_meta(path)
     meta = SessionMeta(
         session_id=session_id,
         tool="claude",
@@ -203,6 +220,8 @@ def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
                 reasoning_tokens=0,
                 source_file=str(path),
                 source_line=line_no,
+                agent_type=agent_type,
+                agent_desc=agent_desc,
             )
             # Some Claude records put cache_write under cache_creation_input_tokens with no split.
             if row.cache_write_5m == 0 and row.cache_write_1h == 0:

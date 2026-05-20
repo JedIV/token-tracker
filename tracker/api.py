@@ -29,8 +29,12 @@ def db():
         conn.close()
 
 
-def _filter_clause(tool, model, project, start, end, prefix="m"):
-    """Returns (sql_fragment, params). All filters optional."""
+def _filter_clause(tool, model, project, start, end, agent=None, prefix="m"):
+    """Returns (sql_fragment, params). All filters optional.
+
+    `agent` semantics: None = no filter; "main" = agent_type IS NULL (top-level session
+    turns); any other value = exact match on agent_type.
+    """
     clauses = []
     params: list = []
     if tool:
@@ -48,6 +52,11 @@ def _filter_clause(tool, model, project, start, end, prefix="m"):
     if project:
         clauses.append("s.cwd = ?")
         params.append(project)
+    if agent == "main":
+        clauses.append(f"{prefix}.agent_type IS NULL")
+    elif agent:
+        clauses.append(f"{prefix}.agent_type = ?")
+        params.append(agent)
     where = " AND ".join(clauses)
     return (f" WHERE {where}" if where else ""), params
 
@@ -73,12 +82,15 @@ def filters():
             "SELECT DISTINCT model FROM messages WHERE model IS NOT NULL ORDER BY model")]
         projects = [r[0] for r in c.execute(
             "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL ORDER BY cwd")]
+        agents = [r[0] for r in c.execute(
+            "SELECT DISTINCT agent_type FROM messages WHERE agent_type IS NOT NULL ORDER BY agent_type")]
         date_range = c.execute(
             "SELECT MIN(ts), MAX(ts) FROM messages").fetchone()
     return {
         "tools": tools,
         "models": models,
         "projects": projects,
+        "agents": agents,
         "date_range": {"min": date_range[0], "max": date_range[1]},
     }
 
@@ -121,10 +133,11 @@ def stats(
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
     granularity: str = Query("auto"),
 ):
     """Totals + time-series + breakdowns. granularity: auto|minute|hour|day|week|month."""
-    where, params = _filter_clause(tool, model, project, start, end)
+    where, params = _filter_clause(tool, model, project, start, end, agent=agent)
     join = "FROM messages m JOIN sessions s ON s.id = m.session_id" + where
 
     gran = granularity if granularity in _GRANULARITY else _pick_granularity(start, end)
@@ -226,6 +239,21 @@ def stats(
                 GROUP BY m.model, m.tool
                 ORDER BY cost_usd DESC""", params).fetchall()]
 
+        # by agent type (sub-agents). NULL agent_type = main session turns.
+        by_agent = [dict(r) for r in c.execute(
+            f"""SELECT COALESCE(m.agent_type,'main session') AS agent,
+                       COUNT(*) msgs,
+                       COUNT(DISTINCT m.session_id) sessions,
+                       SUM(m.input_tokens) input_tokens,
+                       SUM(m.output_tokens) output_tokens,
+                       SUM(m.cache_read) cache_hit,
+                       SUM(m.cache_write_5m) cache_write_5m,
+                       SUM(m.cache_write_1h) cache_write_1h,
+                       SUM(m.est_cost_usd) cost_usd
+                {join}
+                GROUP BY m.agent_type
+                ORDER BY cost_usd DESC""", params).fetchall()]
+
         # by project
         by_project = [dict(r) for r in c.execute(
             f"""SELECT COALESCE(s.cwd,'(unknown)') AS project,
@@ -256,17 +284,19 @@ def stats(
         "by_tool": by_tool,
         "by_model": by_model,
         "by_project": by_project,
+        "by_agent": by_agent,
     }
 
 
 @app.get("/api/breakdown_series")
 def breakdown_series(
-    group: str = Query("model", pattern="^(tool|model|project|session|server|mcp_tool)$"),
+    group: str = Query("model", pattern="^(tool|model|project|session|server|mcp_tool|agent)$"),
     tool: str | None = Query(None),
     model: str | None = Query(None),
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
     granularity: str = Query("auto"),
     limit: int = Query(5, ge=1, le=10),
 ):
@@ -283,6 +313,13 @@ def breakdown_series(
             clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
                            "AND mm.source_line=mc.source_line AND mm.model = ?)")
             params.append(model)
+        if agent == "main":
+            clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                           "AND mm.source_line=mc.source_line AND mm.agent_type IS NULL)")
+        elif agent:
+            clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                           "AND mm.source_line=mc.source_line AND mm.agent_type = ?)")
+            params.append(agent)
         if project:
             clauses.append("s.cwd = ?"); params.append(project)
         if start:
@@ -330,10 +367,12 @@ def breakdown_series(
                   "COALESCE(m.model,'(unknown)') || ' · ' || m.tool"),
         "project": ("COALESCE(s.cwd,'(unknown)')", "COALESCE(s.cwd,'(unknown)')"),
         "session": ("s.id", "s.tool || ' · ' || COALESCE(s.cwd, s.id)"),
+        "agent": ("COALESCE(m.agent_type,'main session')",
+                  "COALESCE(m.agent_type,'main session')"),
     }
     key_expr, label_expr = group_exprs[group]
     bucket = _GRANULARITY[gran]
-    where, params = _filter_clause(tool, model, project, start, end)
+    where, params = _filter_clause(tool, model, project, start, end, agent=agent)
     join = "FROM messages m JOIN sessions s ON s.id = m.session_id" + where
 
     with db() as c:
@@ -387,10 +426,11 @@ def sessions(
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
     limit: int = Query(200, ge=1, le=2000),
     sort: str = Query("cost", pattern="^(cost|recent|messages)$"),
 ):
-    where, params = _filter_clause(tool, model, project, start, end)
+    where, params = _filter_clause(tool, model, project, start, end, agent=agent)
     order = {
         "cost": "est_cost_usd DESC",
         "recent": "ended_at DESC",
@@ -430,8 +470,9 @@ def session_detail(
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
 ):
-    filters, filter_params = _filter_clause(tool, model, project, start, end)
+    filters, filter_params = _filter_clause(tool, model, project, start, end, agent=agent)
     where = " WHERE m.session_id = ?" + filters.replace(" WHERE", " AND", 1)
     params = [session_id, *filter_params]
     with db() as c:
@@ -461,7 +502,8 @@ def session_detail(
         ).fetchone()
         msgs = [dict(r) for r in c.execute(
             f"""SELECT m.ts, m.model, m.input_tokens, m.output_tokens, m.cache_read,
-                      m.cache_write_5m, m.cache_write_1h, m.reasoning_tokens, m.est_cost_usd
+                      m.cache_write_5m, m.cache_write_1h, m.reasoning_tokens, m.est_cost_usd,
+                      m.agent_type, m.agent_desc
                 FROM messages m JOIN sessions s ON s.id = m.session_id
                 {where}
                 ORDER BY m.ts""",
@@ -517,6 +559,7 @@ def mcp(
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
 ):
     """MCP usage breakdown: by server, by server+tool_name. Cost attribution explained
     inline: result tokens × cache_read rate of the session's model (since MCP results
@@ -530,6 +573,13 @@ def mcp(
         clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
                        "AND mm.source_line=mc.source_line AND mm.model = ?)")
         params.append(model)
+    if agent == "main":
+        clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                       "AND mm.source_line=mc.source_line AND mm.agent_type IS NULL)")
+    elif agent:
+        clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                       "AND mm.source_line=mc.source_line AND mm.agent_type = ?)")
+        params.append(agent)
     if project:
         clauses.append("s.cwd = ?"); params.append(project)
     if start:
