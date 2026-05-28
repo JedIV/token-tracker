@@ -25,17 +25,21 @@ Requires [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync                                   # create .venv + install deps
-uv run python -m tracker.ingest -v        # first run
-./scripts/run-server.sh                   # http://127.0.0.1:8732
+make ingest                               # first run
+make server                               # http://127.0.0.1:8732
 ```
 
 ## Periodic ingest (macOS launchd)
 
 ```sh
-./scripts/install-launchagent.sh          # ingests every 5 minutes
-tail -f ~/Library/Logs/token-tracker.log
-./scripts/uninstall-launchagent.sh
+make agent                                # ingests every 5 minutes
+make logs                                 # tail ~/Library/Logs/token-tracker.log
+make down                                 # uninstall the agent
 ```
+
+`make up` loads the launchd agent and then starts the server in one step.
+The raw scripts (`scripts/run-server.sh`, `scripts/install-launchagent.sh`,
+`scripts/uninstall-launchagent.sh`) still work if you'd rather skip make.
 
 The web UI also has a **re-ingest** button that triggers `POST /api/reingest` if you don't
 want to wait.
