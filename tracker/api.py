@@ -1,7 +1,9 @@
 """FastAPI app exposing token-tracker stats."""
 from __future__ import annotations
 
+import json as _json
 import sqlite3
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -11,8 +13,44 @@ from fastapi.staticfiles import StaticFiles
 
 from .db import DEFAULT_DB_PATH, connect, init
 from .ingest import run as run_ingest
-from .pricing import _lookup as _price_lookup
+from .parse_claude import _tool_result_chars
+from .pricing import _lookup as _price_lookup, reload as _price_reload
 from .recompute_costs import run as run_recompute
+
+# Effective max context window (tokens) per model. Used to display the per-turn
+# context size as a % of available context in the timeline view. These are the
+# advertised maximums; the actual model behaviour may compact earlier.
+MODEL_MAX_TOKENS: dict[str, int] = {
+    # Claude 4.x — 1M-context variants (per recent Anthropic announcements).
+    "claude-opus-4-7":   1_000_000,
+    "claude-opus-4-6":   1_000_000,
+    "claude-opus-4-5":   1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-sonnet-4-5": 1_000_000,
+    "claude-haiku-4-5":    200_000,
+    # Older / smaller-context models.
+    "claude-opus-4-1":     200_000,
+    "claude-opus-4":       200_000,
+    "claude-sonnet-4":     200_000,
+    "claude-haiku-3-5":    200_000,
+    # Codex (OpenAI) — large context.
+    "gpt-5":          400_000,
+    "gpt-5-mini":     400_000,
+    "gpt-5-codex":    400_000,
+    "gpt-5.2":        400_000,
+    "gpt-5.2-codex":  400_000,
+    "gpt-5.3-codex":  400_000,
+    "gpt-5.4":        400_000,
+    "gpt-5.4-mini":   400_000,
+    "gpt-5.5":        400_000,
+}
+DEFAULT_MAX_TOKENS = 200_000
+
+
+def _model_max(model: str | None) -> int:
+    if not model:
+        return DEFAULT_MAX_TOKENS
+    return MODEL_MAX_TOKENS.get(model, DEFAULT_MAX_TOKENS)
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -29,8 +67,12 @@ def db():
         conn.close()
 
 
-def _filter_clause(tool, model, project, start, end, prefix="m"):
-    """Returns (sql_fragment, params). All filters optional."""
+def _filter_clause(tool, model, project, start, end, agent=None, entrypoint=None, prefix="m"):
+    """Returns (sql_fragment, params). All filters optional.
+
+    `agent` semantics: None = no filter; "main" = agent_type IS NULL (top-level session
+    turns); any other value = exact match on agent_type.
+    """
     clauses = []
     params: list = []
     if tool:
@@ -48,6 +90,14 @@ def _filter_clause(tool, model, project, start, end, prefix="m"):
     if project:
         clauses.append("s.cwd = ?")
         params.append(project)
+    if agent == "main":
+        clauses.append(f"{prefix}.agent_type IS NULL")
+    elif agent:
+        clauses.append(f"{prefix}.agent_type = ?")
+        params.append(agent)
+    if entrypoint:
+        clauses.append("s.entrypoint = ?")
+        params.append(entrypoint)
     where = " AND ".join(clauses)
     return (f" WHERE {where}" if where else ""), params
 
@@ -73,12 +123,18 @@ def filters():
             "SELECT DISTINCT model FROM messages WHERE model IS NOT NULL ORDER BY model")]
         projects = [r[0] for r in c.execute(
             "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL ORDER BY cwd")]
+        agents = [r[0] for r in c.execute(
+            "SELECT DISTINCT agent_type FROM messages WHERE agent_type IS NOT NULL ORDER BY agent_type")]
+        entrypoints = [r[0] for r in c.execute(
+            "SELECT DISTINCT entrypoint FROM sessions WHERE entrypoint IS NOT NULL ORDER BY entrypoint")]
         date_range = c.execute(
             "SELECT MIN(ts), MAX(ts) FROM messages").fetchone()
     return {
         "tools": tools,
         "models": models,
         "projects": projects,
+        "agents": agents,
+        "entrypoints": entrypoints,
         "date_range": {"min": date_range[0], "max": date_range[1]},
     }
 
@@ -121,10 +177,12 @@ def stats(
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
+    entrypoint: str | None = Query(None),
     granularity: str = Query("auto"),
 ):
     """Totals + time-series + breakdowns. granularity: auto|minute|hour|day|week|month."""
-    where, params = _filter_clause(tool, model, project, start, end)
+    where, params = _filter_clause(tool, model, project, start, end, agent=agent, entrypoint=entrypoint)
     join = "FROM messages m JOIN sessions s ON s.id = m.session_id" + where
 
     gran = granularity if granularity in _GRANULARITY else _pick_granularity(start, end)
@@ -146,6 +204,27 @@ def stats(
                   COALESCE(SUM(m.est_cost_usd),0)   AS cost_usd
                 {join}""", params).fetchone()
         totals = dict(totals_row)
+
+        # Cost breakdown by bucket. Group tokens by (tool, model), apply per-bucket rates,
+        # then sum. Lets the UI show "where the $ went" (cache reads almost always dominate).
+        by_tm = c.execute(
+            f"""SELECT m.tool, m.model,
+                       SUM(m.input_tokens)   AS in_tok,
+                       SUM(m.output_tokens)  AS out_tok,
+                       SUM(m.cache_read)     AS cr_tok,
+                       SUM(m.cache_write_5m) AS cw5_tok,
+                       SUM(m.cache_write_1h) AS cw1_tok
+                {join}
+                GROUP BY m.tool, m.model""", params).fetchall()
+        cb = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write_5m": 0.0, "cache_write_1h": 0.0}
+        for r in by_tm:
+            p = _price_lookup(r["tool"], r["model"])
+            cb["input"]          += (r["in_tok"]  or 0) * p.get("input", 0) / 1_000_000
+            cb["output"]         += (r["out_tok"] or 0) * p.get("output", 0) / 1_000_000
+            cb["cache_read"]     += (r["cr_tok"]  or 0) * p.get("cache_read", 0) / 1_000_000
+            cb["cache_write_5m"] += (r["cw5_tok"] or 0) * p.get("cache_write_5m", 0) / 1_000_000
+            cb["cache_write_1h"] += (r["cw1_tok"] or 0) * p.get("cache_write_1h", 0) / 1_000_000
+        totals["cost_breakdown"] = {k: round(v, 4) for k, v in cb.items()}
 
         # Active hours: sum over sessions of (max(ts) - min(ts)) within the filter window.
         # This excludes pure idle gaps between sessions and gives a more meaningful rate.
@@ -205,6 +284,39 @@ def stats(
                 GROUP BY m.model, m.tool
                 ORDER BY cost_usd DESC""", params).fetchall()]
 
+        # by entrypoint (cli / sdk-cli / codex / …). Tells "interactive REPL" from "spawned SDK runs".
+        by_entrypoint = [dict(r) for r in c.execute(
+            f"""SELECT COALESCE(s.entrypoint,'(unknown)') AS entrypoint,
+                       COUNT(*) msgs,
+                       COUNT(DISTINCT m.session_id) sessions,
+                       SUM(m.input_tokens) input_tokens,
+                       SUM(m.output_tokens) output_tokens,
+                       SUM(m.cache_read) cache_hit,
+                       SUM(m.cache_write_5m) cache_write_5m,
+                       SUM(m.cache_write_1h) cache_write_1h,
+                       SUM(m.est_cost_usd) cost_usd
+                {join}
+                GROUP BY s.entrypoint
+                ORDER BY cost_usd DESC""", params).fetchall()]
+
+        # by agent INVOCATION (one row per sub-agent run, identified by agent_id).
+        # All main-session turns (agent_type IS NULL) collapse into a single aggregate row.
+        by_agent = [dict(r) for r in c.execute(
+            f"""SELECT COALESCE(m.agent_type,'main session') AS agent_type,
+                       m.agent_id,
+                       m.agent_desc,
+                       COUNT(*) msgs,
+                       COUNT(DISTINCT m.session_id) sessions,
+                       SUM(m.input_tokens) input_tokens,
+                       SUM(m.output_tokens) output_tokens,
+                       SUM(m.cache_read) cache_hit,
+                       SUM(m.cache_write_5m) cache_write_5m,
+                       SUM(m.cache_write_1h) cache_write_1h,
+                       SUM(m.est_cost_usd) cost_usd
+                {join}
+                GROUP BY m.agent_type, m.agent_id, m.agent_desc
+                ORDER BY cost_usd DESC""", params).fetchall()]
+
         # by project
         by_project = [dict(r) for r in c.execute(
             f"""SELECT COALESCE(s.cwd,'(unknown)') AS project,
@@ -235,17 +347,21 @@ def stats(
         "by_tool": by_tool,
         "by_model": by_model,
         "by_project": by_project,
+        "by_agent": by_agent,
+        "by_entrypoint": by_entrypoint,
     }
 
 
 @app.get("/api/breakdown_series")
 def breakdown_series(
-    group: str = Query("model", pattern="^(tool|model|project|session|server|mcp_tool)$"),
+    group: str = Query("model", pattern="^(tool|model|project|session|server|mcp_tool|agent|entrypoint)$"),
     tool: str | None = Query(None),
     model: str | None = Query(None),
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
+    entrypoint: str | None = Query(None),
     granularity: str = Query("auto"),
     limit: int = Query(5, ge=1, le=10),
 ):
@@ -262,6 +378,16 @@ def breakdown_series(
             clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
                            "AND mm.source_line=mc.source_line AND mm.model = ?)")
             params.append(model)
+        if agent == "main":
+            clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                           "AND mm.source_line=mc.source_line AND mm.agent_type IS NULL)")
+        elif agent:
+            clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                           "AND mm.source_line=mc.source_line AND mm.agent_type = ?)")
+            params.append(agent)
+        if entrypoint:
+            clauses.append("s.entrypoint = ?")
+            params.append(entrypoint)
         if project:
             clauses.append("s.cwd = ?"); params.append(project)
         if start:
@@ -309,10 +435,18 @@ def breakdown_series(
                   "COALESCE(m.model,'(unknown)') || ' · ' || m.tool"),
         "project": ("COALESCE(s.cwd,'(unknown)')", "COALESCE(s.cwd,'(unknown)')"),
         "session": ("s.id", "s.tool || ' · ' || COALESCE(s.cwd, s.id)"),
+        "agent": (
+            "COALESCE(m.agent_id, COALESCE(m.agent_type,'main session'))",
+            "CASE WHEN m.agent_id IS NULL THEN COALESCE(m.agent_type,'main session') "
+            "     ELSE COALESCE(m.agent_type,'') || ' · ' || substr(m.agent_id,1,8) || "
+            "          ' · ' || COALESCE(m.agent_desc,'(no description)') END",
+        ),
+        "entrypoint": ("COALESCE(s.entrypoint,'(unknown)')",
+                       "COALESCE(s.entrypoint,'(unknown)')"),
     }
     key_expr, label_expr = group_exprs[group]
     bucket = _GRANULARITY[gran]
-    where, params = _filter_clause(tool, model, project, start, end)
+    where, params = _filter_clause(tool, model, project, start, end, agent=agent, entrypoint=entrypoint)
     join = "FROM messages m JOIN sessions s ON s.id = m.session_id" + where
 
     with db() as c:
@@ -366,10 +500,12 @@ def sessions(
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
+    entrypoint: str | None = Query(None),
     limit: int = Query(200, ge=1, le=2000),
     sort: str = Query("cost", pattern="^(cost|recent|messages)$"),
 ):
-    where, params = _filter_clause(tool, model, project, start, end)
+    where, params = _filter_clause(tool, model, project, start, end, agent=agent, entrypoint=entrypoint)
     order = {
         "cost": "est_cost_usd DESC",
         "recent": "ended_at DESC",
@@ -383,6 +519,7 @@ def sessions(
                   s.session_uuid,
                   s.cwd,
                   s.model,
+                  s.entrypoint,
                   MIN(m.ts) AS started_at,
                   MAX(m.ts) AS ended_at,
                   COUNT(*) AS msg_count,
@@ -409,8 +546,10 @@ def session_detail(
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
+    entrypoint: str | None = Query(None),
 ):
-    filters, filter_params = _filter_clause(tool, model, project, start, end)
+    filters, filter_params = _filter_clause(tool, model, project, start, end, agent=agent, entrypoint=entrypoint)
     where = " WHERE m.session_id = ?" + filters.replace(" WHERE", " AND", 1)
     params = [session_id, *filter_params]
     with db() as c:
@@ -440,7 +579,8 @@ def session_detail(
         ).fetchone()
         msgs = [dict(r) for r in c.execute(
             f"""SELECT m.ts, m.model, m.input_tokens, m.output_tokens, m.cache_read,
-                      m.cache_write_5m, m.cache_write_1h, m.reasoning_tokens, m.est_cost_usd
+                      m.cache_write_5m, m.cache_write_1h, m.reasoning_tokens, m.est_cost_usd,
+                      m.agent_type, m.agent_desc, m.agent_id
                 FROM messages m JOIN sessions s ON s.id = m.session_id
                 {where}
                 ORDER BY m.ts""",
@@ -496,6 +636,8 @@ def mcp(
     project: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
+    agent: str | None = Query(None),
+    entrypoint: str | None = Query(None),
 ):
     """MCP usage breakdown: by server, by server+tool_name. Cost attribution explained
     inline: result tokens × cache_read rate of the session's model (since MCP results
@@ -509,6 +651,16 @@ def mcp(
         clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
                        "AND mm.source_line=mc.source_line AND mm.model = ?)")
         params.append(model)
+    if agent == "main":
+        clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                       "AND mm.source_line=mc.source_line AND mm.agent_type IS NULL)")
+    elif agent:
+        clauses.append("EXISTS (SELECT 1 FROM messages mm WHERE mm.source_file=mc.source_file "
+                       "AND mm.source_line=mc.source_line AND mm.agent_type = ?)")
+        params.append(agent)
+    if entrypoint:
+        clauses.append("s.entrypoint = ?")
+        params.append(entrypoint)
     if project:
         clauses.append("s.cwd = ?"); params.append(project)
     if start:
@@ -633,6 +785,174 @@ def mcp_server_detail(
         "by_tool": by_tool,
         "sessions": sessions_rows,
         "calls": calls,
+    }
+
+
+def _input_preview(name: str, inp) -> str:
+    """Short identifier for a tool_use, shown next to the tool name in the timeline."""
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("file_path", "command", "pattern", "path", "url", "query", "description", "prompt"):
+        v = inp.get(k)
+        if isinstance(v, str):
+            return v[:120]
+    return ""
+
+
+def _parse_attributions(source_file: str, wanted_lines: set[int]) -> dict[int, list[dict]]:
+    """For one JSONL file, return {assistant_source_line -> [{name, preview, result_chars, is_error}]}.
+
+    Walks the file once, pairs tool_use blocks with their later tool_result blocks via
+    tool_use_id. Restricted to assistant lines in `wanted_lines` for memory."""
+    out: dict[int, list[dict]] = defaultdict(list)
+    pending: dict[str, tuple[int, dict]] = {}  # tool_use_id -> (assistant_line, entry)
+    try:
+        with open(source_file, "r", errors="replace") as f:
+            line_no = 0
+            for raw in f:
+                line_no += 1
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    d = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    continue
+                t = d.get("type")
+                if t == "assistant":
+                    msg = d.get("message") or {}
+                    for blk in msg.get("content") or []:
+                        if isinstance(blk, dict) and blk.get("type") == "tool_use":
+                            entry = {
+                                "name": blk.get("name", ""),
+                                "preview": _input_preview(blk.get("name", ""), blk.get("input")),
+                                "result_chars": 0,
+                                "is_error": 0,
+                            }
+                            tu_id = blk.get("id") or f"l{line_no}-{len(pending)}"
+                            if line_no in wanted_lines:
+                                out[line_no].append(entry)
+                                pending[tu_id] = (line_no, entry)
+                elif t == "user":
+                    msg = d.get("message") or {}
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        for blk in content:
+                            if isinstance(blk, dict) and blk.get("type") == "tool_result":
+                                tu_id = blk.get("tool_use_id")
+                                if tu_id in pending:
+                                    _, entry = pending[tu_id]
+                                    chars, _ = _tool_result_chars(blk.get("content"))
+                                    entry["result_chars"] = chars
+                                    entry["is_error"] = 1 if blk.get("is_error") else 0
+                                    del pending[tu_id]
+    except (OSError, FileNotFoundError):
+        pass
+    return out
+
+
+@app.get("/api/context_timeline")
+def context_timeline(
+    agent_id: str | None = Query(None),
+    session_id: str | None = Query(None),
+):
+    """Per-turn context size + source attribution for one sub-agent invocation or one
+    main-session thread.
+
+    Returns the assistant-turn usage counts (input/output/cache_read/cache_write) so the
+    UI can plot context-window utilisation over time, plus the tool_use blocks issued
+    on each turn (with the byte size of the matching tool_result, which approximates
+    "how many tokens that source brought into the next turn's context").
+    """
+    if not agent_id and not session_id:
+        raise HTTPException(400, "need agent_id or session_id")
+    with db() as c:
+        if agent_id:
+            rows = c.execute(
+                """SELECT m.id, m.session_id, m.ts, m.model,
+                          m.input_tokens, m.output_tokens,
+                          m.cache_read, m.cache_write_5m, m.cache_write_1h,
+                          m.reasoning_tokens, m.est_cost_usd,
+                          m.source_file, m.source_line,
+                          m.agent_type, m.agent_desc, m.agent_id,
+                          s.cwd
+                   FROM messages m JOIN sessions s ON s.id = m.session_id
+                   WHERE m.agent_id=? ORDER BY m.ts, m.source_line""",
+                (agent_id,)).fetchall()
+        else:
+            rows = c.execute(
+                """SELECT m.id, m.session_id, m.ts, m.model,
+                          m.input_tokens, m.output_tokens,
+                          m.cache_read, m.cache_write_5m, m.cache_write_1h,
+                          m.reasoning_tokens, m.est_cost_usd,
+                          m.source_file, m.source_line,
+                          m.agent_type, m.agent_desc, m.agent_id,
+                          s.cwd
+                   FROM messages m JOIN sessions s ON s.id = m.session_id
+                   WHERE m.session_id=? AND m.agent_type IS NULL
+                   ORDER BY m.ts, m.source_line""",
+                (session_id,)).fetchall()
+    msgs = [dict(r) for r in rows]
+    if not msgs:
+        return {
+            "label": agent_id or session_id,
+            "turns": [], "model": None, "model_max_tokens": DEFAULT_MAX_TOKENS,
+            "cwd": None, "session_id": session_id, "agent_id": agent_id,
+        }
+
+    # Parse JSONL attribution per source_file (one for sub-agent; possibly several
+    # if the main session was resumed across multiple files).
+    by_file: dict[str, set[int]] = defaultdict(set)
+    for m in msgs:
+        by_file[m["source_file"]].add(m["source_line"])
+    attrs_all: dict[tuple[str, int], list[dict]] = {}
+    for src, lines in by_file.items():
+        per_line = _parse_attributions(src, lines)
+        for ln, uses in per_line.items():
+            attrs_all[(src, ln)] = uses
+
+    last_model = next((m["model"] for m in reversed(msgs) if m["model"]), None)
+    model_max = _model_max(last_model)
+    turns = []
+    for idx, m in enumerate(msgs):
+        ctx_total = (m["input_tokens"] + m["cache_read"]
+                     + m["cache_write_5m"] + m["cache_write_1h"])
+        uses = attrs_all.get((m["source_file"], m["source_line"]), [])
+        turns.append({
+            "idx": idx + 1,
+            "ts": m["ts"],
+            "model": m["model"],
+            "input_tokens": m["input_tokens"],
+            "output_tokens": m["output_tokens"],
+            "cache_read": m["cache_read"],
+            "cache_write_5m": m["cache_write_5m"],
+            "cache_write_1h": m["cache_write_1h"],
+            "reasoning_tokens": m["reasoning_tokens"],
+            "context_total": ctx_total,
+            "model_max": _model_max(m["model"]),
+            "tool_uses": uses,
+        })
+
+    label_bits = []
+    first = msgs[0]
+    if first["agent_type"]:
+        label_bits.append(first["agent_type"])
+        if first["agent_id"]:
+            label_bits.append("#" + first["agent_id"][:8])
+        if first["agent_desc"]:
+            label_bits.append(first["agent_desc"])
+    else:
+        label_bits.append("main session")
+        if first.get("cwd"):
+            label_bits.append(first["cwd"])
+    return {
+        "label": " · ".join(label_bits),
+        "session_id": first["session_id"],
+        "agent_id": agent_id,
+        "cwd": first.get("cwd"),
+        "model": last_model,
+        "model_max_tokens": model_max,
+        "turns": turns,
     }
 
 

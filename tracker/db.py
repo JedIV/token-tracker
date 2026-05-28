@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_uuid    TEXT NOT NULL,
     cwd             TEXT,
     model           TEXT,                    -- last model observed in session
+    entrypoint      TEXT,                    -- 'cli' (interactive), 'sdk-cli', 'codex', ... — how the run was launched
     started_at      TEXT,
     ended_at        TEXT,
     msg_count       INTEGER NOT NULL DEFAULT 0,
@@ -37,12 +38,16 @@ CREATE TABLE IF NOT EXISTS messages (
     est_cost_usd    REAL NOT NULL DEFAULT 0,
     source_file     TEXT NOT NULL,
     source_line     INTEGER NOT NULL,
+    agent_type      TEXT,                    -- e.g. 'Explore', 'Plan' for sub-agents; NULL for the main session
+    agent_desc      TEXT,                    -- per-invocation description from the meta.json sidecar
+    agent_id        TEXT,                    -- per-invocation hash from the JSONL filename (the sub-agent "PID")
     UNIQUE(source_file, source_line)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool);
 CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model);
+-- idx_messages_agent_type is created in init() after the column-add migration runs.
 
 CREATE TABLE IF NOT EXISTS mcp_calls (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +104,19 @@ def init(db_path: Path | str = DEFAULT_DB_PATH) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA)
+        # Lightweight column migrations for existing DBs (CREATE TABLE IF NOT EXISTS won't add new columns).
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "agent_type" not in existing:
+            conn.execute("ALTER TABLE messages ADD COLUMN agent_type TEXT")
+        if "agent_desc" not in existing:
+            conn.execute("ALTER TABLE messages ADD COLUMN agent_desc TEXT")
+        if "agent_id" not in existing:
+            conn.execute("ALTER TABLE messages ADD COLUMN agent_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_agent_type ON messages(agent_type)")
+        existing_s = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "entrypoint" not in existing_s:
+            conn.execute("ALTER TABLE sessions ADD COLUMN entrypoint TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_entrypoint ON sessions(entrypoint)")
         conn.commit()
     finally:
         conn.close()

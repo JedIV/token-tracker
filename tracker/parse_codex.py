@@ -40,6 +40,7 @@ def parse_file(path: Path, *, start_offset: int = 0) -> tuple[ParsedFile, int]:
         model=None,
         started_at=None,
         ended_at=None,
+        entrypoint="codex",
     )
     parsed = ParsedFile(session=meta)
 

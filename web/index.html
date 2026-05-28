@@ -5,7 +5,8 @@
   <title>token tracker</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@3"></script>
+  <link rel="stylesheet" href="/static/styles.css?v=ctx5">
 </head>
 <body>
   <header>
@@ -27,6 +28,12 @@
     <label>project
       <select id="f-project"><option value="">all</option></select>
     </label>
+    <label>agent
+      <select id="f-agent"><option value="">all</option></select>
+    </label>
+    <label>entrypoint
+      <select id="f-entrypoint"><option value="">all</option></select>
+    </label>
     <label>from
       <input type="date" id="f-start">
     </label>
@@ -38,13 +45,21 @@
     <span class="range-presets">
       <button class="btn range" data-range="1h">1h</button>
       <button class="btn range" data-range="24h">24h</button>
+      <button class="btn range" data-range="today">today</button>
       <button class="btn range" data-range="7d">7d</button>
       <button class="btn range" data-range="30d">30d</button>
       <button class="btn range" data-range="all">all</button>
     </span>
   </section>
 
-  <section class="cards" id="cards"></section>
+  <section class="card-group">
+    <div class="card-group-label">overview</div>
+    <div class="cards cards--locked" id="cards-overview"></div>
+  </section>
+  <section class="card-group">
+    <div class="card-group-label">where the $ goes</div>
+    <div class="cards cards--locked" id="cards-breakdown"></div>
+  </section>
 
   <section class="panel">
     <div class="row-controls">
@@ -74,12 +89,15 @@
         <button class="btn group" data-group="tool">by tool</button>
         <button class="btn group active" data-group="model">by model</button>
         <button class="btn group" data-group="project">by project</button>
+        <button class="btn group" data-group="agent">by agent</button>
+        <button class="btn group" data-group="entrypoint">by entrypoint</button>
         <button class="btn group" data-group="session">by session</button>
         <button class="btn group" data-group="server">by mcp server</button>
         <button class="btn group" data-group="mcp_tool">by mcp tool</button>
       </span>
       <span id="group-controls"></span>
       <span class="muted" id="group-hint"></span>
+      <button id="copy-breakdown" class="btn" style="margin-left:auto" title="copy table as TSV (paste into Sheets/Excel/Slack)">copy</button>
     </div>
     <div class="chart-wrap breakdown-chart"><canvas id="chart-breakdown"></canvas></div>
     <table id="t-breakdown"></table>
@@ -99,6 +117,6 @@
     <span id="last-run" class="muted"></span>
   </footer>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=ctx5"></script>
 </body>
 </html>
