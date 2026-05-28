@@ -143,11 +143,13 @@ function queryString(extra = {}) {
   return q ? "?" + q : "";
 }
 
-function fillSelect(el, values, current = "") {
+function fillSelect(el, values, current = "", labelFn = null) {
   el.innerHTML = '<option value="">all</option>';
   for (const v of values) {
     const o = document.createElement("option");
-    o.value = v; o.textContent = v;
+    o.value = v;
+    o.textContent = labelFn ? labelFn(v) : v;
+    if (labelFn) o.title = v;  // full value on hover when display is truncated
     if (v === current) o.selected = true;
     el.appendChild(o);
   }
@@ -157,7 +159,9 @@ async function loadFilters() {
   const d = await api("/api/filters");
   fillSelect($("#f-tool"), d.tools, STATE.filters.tool);
   fillSelect($("#f-model"), d.models, STATE.filters.model);
-  fillSelect($("#f-project"), d.projects, STATE.filters.project);
+  // Tail-truncate the displayed path so the dropdown stays narrow; full path is preserved on hover
+  // and as the option value. Same convention as the by-project breakdown table.
+  fillSelect($("#f-project"), d.projects, STATE.filters.project, (v) => fmt.pathTail(v, 28));
   // agent dropdown: "main" pseudo-value selects top-level (non-sub-agent) turns only.
   fillSelect($("#f-agent"), ["main", ...(d.agents || [])], STATE.filters.agent);
   fillSelect($("#f-entrypoint"), d.entrypoints || [], STATE.filters.entrypoint);
@@ -411,14 +415,17 @@ function setTable(sel, cols, rows, opts = {}) {
     t.innerHTML = `<tbody><tr><td class="dim">no data</td></tr></tbody>`;
     return;
   }
-  const head = `<thead><tr>${cols.map(c => `<th class="${c.num ? "num" : ""}">${c.label}</th>`).join("")}</tr></thead>`;
+  const head = `<thead><tr>${cols.map(c => `<th class="${c.num ? "num" : ""}">${c.label}</th>`).join("")}<th class="row-copy"></th></tr></thead>`;
   const body = rows.map((r, i) => {
     const tds = cols.map(c => {
       let v = c.fmt ? c.fmt(r[c.key], r) : r[c.key];
       if (v == null) v = "—";
       return `<td class="${c.num ? "num" : ""}${c.css ? " " + c.css : ""}">${v}</td>`;
     }).join("");
-    return `<tr${opts.click ? ` data-idx="${i}" class="clickable"` : ""}>${tds}</tr>`;
+    // Per-row copy button. Lives in its own column so clicking it doesn't fire the row's
+    // open-session handler (we stopPropagation in JS too).
+    const copyCell = `<td class="row-copy"><button class="row-copy-btn" title="copy row as TSV">⧉</button></td>`;
+    return `<tr${opts.click ? ` data-idx="${i}" class="clickable"` : ""}>${tds}${copyCell}</tr>`;
   }).join("");
   t.innerHTML = head + `<tbody>${body}</tbody>`;
   if (opts.click) {
@@ -426,6 +433,29 @@ function setTable(sel, cols, rows, opts = {}) {
       tr.addEventListener("click", () => opts.click(rows[Number(tr.dataset.idx)]));
     });
   }
+  t.querySelectorAll(".row-copy-btn").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const tr = btn.closest("tr");
+      // Skip the trailing copy cell when serializing.
+      const cells = Array.from(tr.querySelectorAll("td:not(.row-copy)"))
+        .map(td => (td.textContent || "").replace(/\s+/g, " ").trim().replace(/\t/g, " "));
+      const tsv = cells.join("\t");
+      const orig = btn.textContent;
+      try {
+        await navigator.clipboard.writeText(tsv);
+        btn.textContent = "✓";
+      } catch (_) {
+        const ta = document.createElement("textarea");
+        ta.value = tsv; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        btn.textContent = "✓";
+      }
+      setTimeout(() => { btn.textContent = orig; }, 900);
+    });
+  });
 }
 
 async function loadStats() {
@@ -490,6 +520,7 @@ const BREAKDOWN_COLS = {
     { key: "cost_usd", label: "cost", num: true, fmt: fmt.usd, css: "cost" },
   ],
   agent: [
+    { key: "_ctx", label: "", fmt: (_, r) => `<button class="ctx-btn" data-agent-id="${r.agent_id || ""}" data-agent-type="${(r.agent_type || "").replace(/"/g, "&quot;")}" title="show context-window timeline">ctx</button>` },
     { key: "agent_type", label: "agent" },
     { key: "agent_id", label: "id", css: "dim", fmt: (v) => v ? v.slice(0, 8) : "—" },
     { key: "agent_desc", label: "task", fmt: (v) => v ? fmt.pathTail(v, 60) : "—" },
@@ -585,7 +616,362 @@ async function loadBreakdown() {
   }
 
   setTable("#t-breakdown", BREAKDOWN_COLS[g], rows, clickFn ? { click: clickFn } : {});
+  if (g === "agent") {
+    // Per-row "ctx" buttons → open the context-window timeline modal. Delegated handler
+    // attached after the table is replaced.
+    $("#t-breakdown").querySelectorAll(".ctx-btn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const aid = btn.dataset.agentId || "";
+        const at = btn.dataset.agentType || "";
+        if (aid) showContextTimeline({ agent_id: aid });
+        else showContextTimelinePicker(at);  // main session — pick a session
+      });
+    });
+  }
   renderBreakdownChart(g);
+}
+
+let timelineChart;
+let sourcesChart;
+
+// Stable color per tool name; falls back to a hash-derived palette entry.
+const TOOL_COLORS = {
+  Read: "#7cc4ff", Bash: "#ffd479", Edit: "#ff9bb3", Write: "#ff7a7a",
+  Grep: "#7fe6a8", Glob: "#a8e6cf", Task: "#c9a4ff",
+  WebFetch: "#ffd479", WebSearch: "#ffa07a", NotebookEdit: "#ff9bb3",
+  TodoWrite: "#9aa1ad", Skill: "#7cc4ff",
+};
+const PALETTE = ["#7cc4ff", "#ffd479", "#7fe6a8", "#ff9bb3", "#c9a4ff", "#ffa07a", "#a8e6cf", "#ff7a7a", "#9aa1ad", "#80deea"];
+function colorForTool(name) {
+  if (TOOL_COLORS[name]) return TOOL_COLORS[name];
+  if (name && name.startsWith("mcp__")) return "#c9a4ff";
+  let h = 0;
+  for (let i = 0; i < (name || "").length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return PALETTE[Math.abs(h) % PALETTE.length];
+}
+
+async function showContextTimelinePicker(agentLabel) {
+  // Aggregated rows (main session) span many sessions. Open the modal with the
+  // current-filter session list so the user can pick one to drill into.
+  const d = await api("/api/sessions" + queryString({ sort: "cost", limit: 50 }));
+  $("#sd-title").textContent = `${agentLabel || "main session"} — pick a session`;
+  const rows = (d.sessions || []).filter(s => s.tool === "claude" || s.tool === "codex");
+  const head = `<p class="muted">"main session" aggregates many top-level sessions. Pick one below to see its context-window timeline.</p>`;
+  const tbl = tableHTML([
+    { key: "tool", label: "tool" },
+    { key: "model", label: "model", css: "dim" },
+    { key: "cwd", label: "project", fmt: (v) => fmt.pathTail(v, 50) },
+    { key: "msg_count", label: "msgs", num: true, fmt: fmt.n },
+    { key: "input_tokens", label: "input", num: true, fmt: fmt.n },
+    { key: "cache_read", label: "cache hit", num: true, fmt: fmt.n },
+    { key: "started_at", label: "started", fmt: fmt.date, css: "dim" },
+    { key: "est_cost_usd", label: "cost", num: true, fmt: fmt.usd, css: "cost" },
+  ], rows.map((r, i) => ({ ...r, _idx: i })), { click: true });
+  $("#sd-content").innerHTML = head + tbl;
+  $("#session-detail").classList.remove("hidden");
+  $("#sd-content").querySelectorAll("tr.clickable").forEach(tr => {
+    tr.addEventListener("click", () => {
+      const row = JSON.parse(tr.dataset.row);
+      showContextTimeline({ session_id: row.id });
+    });
+  });
+}
+
+async function showContextTimeline(opts) {
+  const qs = new URLSearchParams();
+  if (opts.agent_id) qs.set("agent_id", opts.agent_id);
+  if (opts.session_id) qs.set("session_id", opts.session_id);
+  const d = await api("/api/context_timeline?" + qs.toString());
+  $("#sd-title").textContent = "context timeline — " + (d.label || "");
+  if (!d.turns.length) {
+    $("#sd-content").innerHTML = `<div class="empty">no turns found.</div>`;
+    $("#session-detail").classList.remove("hidden");
+    return;
+  }
+
+  const max = d.model_max_tokens || 200000;
+  const lastCtx = d.turns[d.turns.length - 1].context_total;
+  const peakCtx = d.turns.reduce((m, t) => Math.max(m, t.context_total), 0);
+  const head = `
+    <div class="cards" style="border:1px solid var(--border)">
+      <div class="card"><div class="label">model</div><div class="value" style="font-size:13px">${d.model || "?"}</div><div class="sub">max ${fmt.short(max)} tok</div></div>
+      <div class="card"><div class="label">turns</div><div class="value">${fmt.n(d.turns.length)}</div></div>
+      <div class="card"><div class="label">peak context</div><div class="value">${fmt.short(peakCtx)}</div><div class="sub">${(100 * peakCtx / max).toFixed(1)}% of max</div></div>
+      <div class="card"><div class="label">final context</div><div class="value">${fmt.short(lastCtx)}</div><div class="sub">${(100 * lastCtx / max).toFixed(1)}% of max</div></div>
+    </div>
+    <div class="timeline-grid" style="margin-top: 14px">
+      <div>
+        <div class="muted" style="margin-bottom: 4px">prompt-size per turn (stacked) — dashed line = model max</div>
+        <div class="chart-wrap" style="height: 360px"><canvas id="chart-timeline"></canvas></div>
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom: 4px">biggest context sources (aggregated · tile area ∝ bytes)</div>
+        <div class="chart-wrap" style="height: 360px"><canvas id="chart-sources"></canvas></div>
+      </div>
+    </div>
+    <div class="row-controls" style="margin: 14px 0 6px">
+      <h4 style="margin:0; font-size:12px; text-transform:uppercase; letter-spacing:0.4px; color:var(--text-dim)">per-turn source attribution</h4>
+      <span class="muted">tool_result bytes ≈ tokens × 4; biggest sources per turn</span>
+    </div>
+    <div id="timeline-table-wrap"></div>
+  `;
+  $("#sd-content").innerHTML = head;
+  $("#session-detail").classList.remove("hidden");
+
+  const labels = d.turns.map(t => "#" + t.idx);
+  const ds = (label, key, color) => ({
+    label,
+    data: d.turns.map(t => t[key] || 0),
+    backgroundColor: color + "cc",
+    borderColor: color,
+    fill: true,
+    tension: 0.2,
+    pointRadius: 1,
+    borderWidth: 1,
+    stack: "ctx",
+  });
+  // Stacked-area: bottom (cache_read) is the bulk that's just being re-read; cache_write_*
+  // is what newly entered the prompt this turn (i.e. what grew context); input_tokens is
+  // the small uncached delta. Their sum = total prompt size sent to the model.
+  if (timelineChart) timelineChart.destroy();
+  timelineChart = new Chart($("#chart-timeline"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        ds("cache read", "cache_read", "#7fe6a8"),
+        ds("cache write 5m", "cache_write_5m", "#c9a4ff"),
+        ds("cache write 1h", "cache_write_1h", "#ff9bb3"),
+        ds("fresh input", "input_tokens", "#7cc4ff"),
+      ],
+    },
+    options: {
+      ...chartCommon,
+      plugins: {
+        ...chartCommon.plugins,
+        title: { display: true, text: `prompt-size stack per turn (horizontal line = ${fmt.short(max)} model max)`, color: "#9aa1ad", font: { size: 11, family: "ui-monospace, monospace" } },
+        tooltip: {
+          ...chartCommon.plugins.tooltip,
+          callbacks: {
+            title: (items) => {
+              const t = d.turns[items[0].dataIndex];
+              return `turn ${t.idx} · ${fmt.date(t.ts)}`;
+            },
+            footer: (items) => {
+              const t = d.turns[items[0].dataIndex];
+              const pct = (100 * t.context_total / max).toFixed(1);
+              return `total: ${fmt.n(t.context_total)} (${pct}% of max)`;
+            },
+          },
+        },
+        // Horizontal model-max reference line drawn via an annotation-ish trick: we
+        // overlay a thin extra dataset that's a flat line at `max`. Cheap and avoids
+        // adding chart.js annotation plugin.
+      },
+      scales: {
+        x: {
+          ...chartCommon.scales.x,
+          ticks: { ...chartCommon.scales.x.ticks, autoSkip: true, maxTicksLimit: Math.min(20, labels.length) },
+        },
+        // No fixed max — Chart.js auto-scales to the visible datasets, so hiding a
+        // band via the legend zooms in on what's left. The model-max reference line
+        // self-hides when it falls outside the auto-picked range.
+        y: { ...chartCommon.scales.y, stacked: true },
+      },
+    },
+    plugins: [{
+      id: "model-max-line",
+      afterDraw(chart) {
+        const { ctx, chartArea: { left, right }, scales: { y } } = chart;
+        const yPos = y.getPixelForValue(max);
+        if (!isFinite(yPos) || yPos < y.top || yPos > y.bottom) return;
+        ctx.save();
+        ctx.strokeStyle = "#ff7a7a";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(left, yPos);
+        ctx.lineTo(right, yPos);
+        ctx.stroke();
+        ctx.fillStyle = "#ff7a7a";
+        ctx.font = "10px ui-monospace, monospace";
+        ctx.fillText(`max ${fmt.short(max)}`, left + 6, yPos - 4);
+        ctx.restore();
+      },
+    }],
+  });
+
+  renderSourcesTreemap(d.turns, d.cwd);
+
+  // Per-turn delta + top tool_uses table.
+  const tblRows = [];
+  let prev = 0;
+  for (const t of d.turns) {
+    const sortedUses = (t.tool_uses || []).slice().sort((a, b) => (b.result_chars || 0) - (a.result_chars || 0));
+    const top = sortedUses.slice(0, 3).map(u => {
+      const tok = Math.round((u.result_chars || 0) / 4);
+      const preview = u.preview ? ` <span class="dim">${escapeHtml(u.preview).slice(0, 50)}</span>` : "";
+      return `${u.name}${preview} <span class="dim">(${fmt.short(tok)}t)</span>`;
+    }).join("<br>");
+    tblRows.push({
+      idx: "#" + t.idx,
+      ts: fmt.date(t.ts),
+      context_total: t.context_total,
+      pct: (100 * t.context_total / max).toFixed(1) + "%",
+      delta: prev ? (t.context_total - prev) : t.context_total,
+      output_tokens: t.output_tokens,
+      sources: top || "<span class='dim'>—</span>",
+    });
+    prev = t.context_total;
+  }
+  tblRows.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  const tblHtml = `<table>${tableHTML([
+    { key: "idx", label: "turn", css: "dim" },
+    { key: "ts", label: "time", css: "dim" },
+    { key: "context_total", label: "context", num: true, fmt: fmt.n },
+    { key: "pct", label: "% of max", num: true },
+    { key: "delta", label: "Δ vs prev", num: true, fmt: (v) => (v > 0 ? "+" : "") + fmt.n(v) },
+    { key: "output_tokens", label: "output", num: true, fmt: fmt.n },
+    { key: "sources", label: "biggest tool_result sources" },
+  ], tblRows.slice(0, 50)).replace(/^<table>|<\/table>$/g, "")}</table>`;
+  $("#timeline-table-wrap").innerHTML = `<div class="muted" style="margin-bottom:4px">sorted by |Δ| — biggest context-growth turns first; top 50</div>` + tblHtml;
+}
+
+function shortenPreview(preview, cwd) {
+  if (!preview) return "";
+  // Strip the working-dir prefix so file paths render as repo-relative. Handles
+  // both exact-prefix matches and the trailing-slash variant.
+  if (cwd) {
+    if (preview === cwd) return "./";
+    if (preview.startsWith(cwd + "/")) return preview.slice(cwd.length + 1);
+    if (preview.startsWith(cwd)) return preview.slice(cwd.length);
+  }
+  // Collapse $HOME for absolute paths outside the project.
+  if (preview.startsWith("/Users/")) {
+    const rest = preview.slice("/Users/".length);
+    const slash = rest.indexOf("/");
+    if (slash > 0) return "~/" + rest.slice(slash + 1);
+  }
+  return preview;
+}
+
+function renderSourcesTreemap(turns, cwd) {
+  // Aggregate tool_result bytes across all turns, grouped by (tool, preview).
+  // The treemap shows tiles sized by total chars, colored by tool name. Repeated
+  // reads of the same path collapse into one tile so the biggest accumulated
+  // context sources stand out.
+  const agg = new Map();
+  for (const t of turns) {
+    for (const u of (t.tool_uses || [])) {
+      const chars = u.result_chars || 0;
+      if (chars <= 0) continue;
+      const shortPreview = shortenPreview(u.preview || "", cwd);
+      const key = (u.name || "?") + " :: " + shortPreview;
+      const cur = agg.get(key);
+      if (cur) { cur.chars += chars; cur.count += 1; }
+      else agg.set(key, { tool: u.name || "?", preview: shortPreview, chars, count: 1 });
+    }
+  }
+  let entries = Array.from(agg.values()).sort((a, b) => b.chars - a.chars);
+  // Cap to top-N to keep the treemap readable; bundle the rest into "other".
+  const TOP = 40;
+  if (entries.length > TOP) {
+    const head = entries.slice(0, TOP);
+    const tail = entries.slice(TOP);
+    const otherChars = tail.reduce((s, e) => s + e.chars, 0);
+    const otherCount = tail.reduce((s, e) => s + e.count, 0);
+    head.push({ tool: "(other)", preview: `${tail.length} sources`, chars: otherChars, count: otherCount });
+    entries = head;
+  }
+
+  const canvas = $("#chart-sources");
+  if (sourcesChart) sourcesChart.destroy();
+  if (!entries.length || typeof Chart === "undefined" || !Chart.registry.controllers.get("treemap")) {
+    canvas.parentElement.innerHTML = `<div class="empty" style="padding:24px">no tool_result data to chart (treemap plugin missing or zero sources)</div>`;
+    return;
+  }
+
+  sourcesChart = new Chart(canvas, {
+    type: "treemap",
+    data: {
+      datasets: [{
+        tree: entries,
+        key: "chars",
+        groups: ["tool", "preview"],
+        spacing: 1,
+        borderColor: "#0e0f12",
+        borderWidth: 1,
+        captions: {
+          display: true,
+          color: "#0e0f12",
+          font: { family: "ui-monospace, monospace", size: 11, weight: "600" },
+          padding: 4,
+          formatter: (ctx) => {
+            // Group captions (level 0 = tool). Includes total size for context.
+            if (ctx.type !== "data") return "";
+            const r = ctx.raw;
+            if (r.l === 0) {
+              return `${r.g}  ·  ${fmtShort(r.v)}t`;
+            }
+            return "";
+          },
+        },
+        labels: {
+          display: true,
+          color: "#0e0f12",
+          font: { family: "ui-monospace, monospace", size: 10 },
+          padding: 4,
+          formatter: (ctx) => {
+            if (ctx.type !== "data") return "";
+            const r = ctx.raw;
+            if (r.l !== 1) return "";  // only label leaf tiles
+            const preview = r._data.children[0].preview || r._data.children[0].tool;
+            const tokens = Math.round((r.v || 0) / 4);
+            const short = preview.length > 40 ? "…" + preview.slice(-39) : preview;
+            return [short, fmtShort(tokens) + "t"];
+          },
+        },
+        backgroundColor: (ctx) => {
+          if (ctx.type !== "data") return "rgba(255,255,255,0.05)";
+          const r = ctx.raw;
+          const tool = r.g || (r._data && r._data.children && r._data.children[0].tool);
+          return colorForTool(tool);
+        },
+      }],
+    },
+    options: {
+      ...chartCommon,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          ...chartCommon.plugins.tooltip,
+          callbacks: {
+            title: (items) => {
+              const r = items[0].raw;
+              if (r.l === 0) return r.g + " (tool)";
+              const ch = r._data.children[0];
+              return ch.tool + " · " + (ch.preview || "(no preview)");
+            },
+            label: (item) => {
+              const r = item.raw;
+              const tokens = Math.round((r.v || 0) / 4);
+              if (r.l === 0) return `${fmt.bytes(r.v)} · ~${fmt.n(tokens)} tokens`;
+              const ch = r._data.children[0];
+              return `${fmt.bytes(r.v)} · ~${fmt.n(tokens)} tokens · ${ch.count}× calls`;
+            },
+          },
+        },
+      },
+      scales: { x: { display: false }, y: { display: false } },
+    },
+  });
+}
+
+function fmtShort(n) { return fmt.short(n); }
+
+function escapeHtml(s) {
+  return String(s || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 async function showMcpServer(server, toolName) {
@@ -733,6 +1119,11 @@ function applyRange(preset) {
   switch (preset) {
     case "1h":  start = new Date(now - 60*60*1000).toISOString(); gran = "minute"; break;
     case "24h": start = new Date(now - 24*60*60*1000).toISOString(); gran = "hour"; break;
+    case "today": {
+      // local midnight, anchored to the browser's TZ so "today" matches the wall clock.
+      const m = new Date(now); m.setHours(0, 0, 0, 0);
+      start = m.toISOString(); gran = "hour"; break;
+    }
     case "7d":  start = new Date(now - 7*24*60*60*1000).toISOString(); gran = "hour"; break;
     case "30d": start = new Date(now - 30*24*60*60*1000).toISOString(); gran = "day"; break;
     case "all": start = ""; gran = "auto"; break;
@@ -770,6 +1161,43 @@ async function reingest() {
   }
 }
 
+function tableToTSV(tableEl) {
+  const rows = [];
+  for (const tr of tableEl.querySelectorAll("tr")) {
+    const cells = Array.from(tr.children).map(c => {
+      // Strip nested HTML to plain text, collapse whitespace, escape tabs/newlines.
+      return (c.textContent || "").replace(/\s+/g, " ").trim().replace(/\t/g, " ");
+    });
+    if (cells.length) rows.push(cells.join("\t"));
+  }
+  return rows.join("\n");
+}
+
+async function copyBreakdown() {
+  const btn = $("#copy-breakdown");
+  const t = $("#t-breakdown");
+  if (!t || !t.querySelector("tr")) {
+    btn.textContent = "nothing to copy";
+    setTimeout(() => { btn.textContent = "copy"; }, 1200);
+    return;
+  }
+  const tsv = tableToTSV(t);
+  const orig = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(tsv);
+    btn.textContent = `copied ${tsv.split("\n").length - 1} rows`;
+  } catch (e) {
+    // Fallback for non-secure contexts where the Clipboard API is unavailable.
+    const ta = document.createElement("textarea");
+    ta.value = tsv; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    btn.textContent = ok ? "copied" : "copy failed";
+  }
+  setTimeout(() => { btn.textContent = orig; }, 1500);
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   await checkHealth();
   await loadFilters();
@@ -795,6 +1223,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadBreakdown();
   }));
   $("#reingest").addEventListener("click", reingest);
+  $("#copy-breakdown").addEventListener("click", copyBreakdown);
   // session sort is added dynamically by loadBreakdown when group=session.
   $("#recompute").addEventListener("click", async () => {
     const btn = $("#recompute");

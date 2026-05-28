@@ -1,7 +1,9 @@
 """FastAPI app exposing token-tracker stats."""
 from __future__ import annotations
 
+import json as _json
 import sqlite3
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -11,8 +13,44 @@ from fastapi.staticfiles import StaticFiles
 
 from .db import DEFAULT_DB_PATH, connect, init
 from .ingest import run as run_ingest
+from .parse_claude import _tool_result_chars
 from .pricing import _lookup as _price_lookup, reload as _price_reload
 from .recompute_costs import run as run_recompute
+
+# Effective max context window (tokens) per model. Used to display the per-turn
+# context size as a % of available context in the timeline view. These are the
+# advertised maximums; the actual model behaviour may compact earlier.
+MODEL_MAX_TOKENS: dict[str, int] = {
+    # Claude 4.x — 1M-context variants (per recent Anthropic announcements).
+    "claude-opus-4-7":   1_000_000,
+    "claude-opus-4-6":   1_000_000,
+    "claude-opus-4-5":   1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-sonnet-4-5": 1_000_000,
+    "claude-haiku-4-5":    200_000,
+    # Older / smaller-context models.
+    "claude-opus-4-1":     200_000,
+    "claude-opus-4":       200_000,
+    "claude-sonnet-4":     200_000,
+    "claude-haiku-3-5":    200_000,
+    # Codex (OpenAI) — large context.
+    "gpt-5":          400_000,
+    "gpt-5-mini":     400_000,
+    "gpt-5-codex":    400_000,
+    "gpt-5.2":        400_000,
+    "gpt-5.2-codex":  400_000,
+    "gpt-5.3-codex":  400_000,
+    "gpt-5.4":        400_000,
+    "gpt-5.4-mini":   400_000,
+    "gpt-5.5":        400_000,
+}
+DEFAULT_MAX_TOKENS = 200_000
+
+
+def _model_max(model: str | None) -> int:
+    if not model:
+        return DEFAULT_MAX_TOKENS
+    return MODEL_MAX_TOKENS.get(model, DEFAULT_MAX_TOKENS)
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -747,6 +785,174 @@ def mcp_server_detail(
         "by_tool": by_tool,
         "sessions": sessions_rows,
         "calls": calls,
+    }
+
+
+def _input_preview(name: str, inp) -> str:
+    """Short identifier for a tool_use, shown next to the tool name in the timeline."""
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("file_path", "command", "pattern", "path", "url", "query", "description", "prompt"):
+        v = inp.get(k)
+        if isinstance(v, str):
+            return v[:120]
+    return ""
+
+
+def _parse_attributions(source_file: str, wanted_lines: set[int]) -> dict[int, list[dict]]:
+    """For one JSONL file, return {assistant_source_line -> [{name, preview, result_chars, is_error}]}.
+
+    Walks the file once, pairs tool_use blocks with their later tool_result blocks via
+    tool_use_id. Restricted to assistant lines in `wanted_lines` for memory."""
+    out: dict[int, list[dict]] = defaultdict(list)
+    pending: dict[str, tuple[int, dict]] = {}  # tool_use_id -> (assistant_line, entry)
+    try:
+        with open(source_file, "r", errors="replace") as f:
+            line_no = 0
+            for raw in f:
+                line_no += 1
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    d = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    continue
+                t = d.get("type")
+                if t == "assistant":
+                    msg = d.get("message") or {}
+                    for blk in msg.get("content") or []:
+                        if isinstance(blk, dict) and blk.get("type") == "tool_use":
+                            entry = {
+                                "name": blk.get("name", ""),
+                                "preview": _input_preview(blk.get("name", ""), blk.get("input")),
+                                "result_chars": 0,
+                                "is_error": 0,
+                            }
+                            tu_id = blk.get("id") or f"l{line_no}-{len(pending)}"
+                            if line_no in wanted_lines:
+                                out[line_no].append(entry)
+                                pending[tu_id] = (line_no, entry)
+                elif t == "user":
+                    msg = d.get("message") or {}
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        for blk in content:
+                            if isinstance(blk, dict) and blk.get("type") == "tool_result":
+                                tu_id = blk.get("tool_use_id")
+                                if tu_id in pending:
+                                    _, entry = pending[tu_id]
+                                    chars, _ = _tool_result_chars(blk.get("content"))
+                                    entry["result_chars"] = chars
+                                    entry["is_error"] = 1 if blk.get("is_error") else 0
+                                    del pending[tu_id]
+    except (OSError, FileNotFoundError):
+        pass
+    return out
+
+
+@app.get("/api/context_timeline")
+def context_timeline(
+    agent_id: str | None = Query(None),
+    session_id: str | None = Query(None),
+):
+    """Per-turn context size + source attribution for one sub-agent invocation or one
+    main-session thread.
+
+    Returns the assistant-turn usage counts (input/output/cache_read/cache_write) so the
+    UI can plot context-window utilisation over time, plus the tool_use blocks issued
+    on each turn (with the byte size of the matching tool_result, which approximates
+    "how many tokens that source brought into the next turn's context").
+    """
+    if not agent_id and not session_id:
+        raise HTTPException(400, "need agent_id or session_id")
+    with db() as c:
+        if agent_id:
+            rows = c.execute(
+                """SELECT m.id, m.session_id, m.ts, m.model,
+                          m.input_tokens, m.output_tokens,
+                          m.cache_read, m.cache_write_5m, m.cache_write_1h,
+                          m.reasoning_tokens, m.est_cost_usd,
+                          m.source_file, m.source_line,
+                          m.agent_type, m.agent_desc, m.agent_id,
+                          s.cwd
+                   FROM messages m JOIN sessions s ON s.id = m.session_id
+                   WHERE m.agent_id=? ORDER BY m.ts, m.source_line""",
+                (agent_id,)).fetchall()
+        else:
+            rows = c.execute(
+                """SELECT m.id, m.session_id, m.ts, m.model,
+                          m.input_tokens, m.output_tokens,
+                          m.cache_read, m.cache_write_5m, m.cache_write_1h,
+                          m.reasoning_tokens, m.est_cost_usd,
+                          m.source_file, m.source_line,
+                          m.agent_type, m.agent_desc, m.agent_id,
+                          s.cwd
+                   FROM messages m JOIN sessions s ON s.id = m.session_id
+                   WHERE m.session_id=? AND m.agent_type IS NULL
+                   ORDER BY m.ts, m.source_line""",
+                (session_id,)).fetchall()
+    msgs = [dict(r) for r in rows]
+    if not msgs:
+        return {
+            "label": agent_id or session_id,
+            "turns": [], "model": None, "model_max_tokens": DEFAULT_MAX_TOKENS,
+            "cwd": None, "session_id": session_id, "agent_id": agent_id,
+        }
+
+    # Parse JSONL attribution per source_file (one for sub-agent; possibly several
+    # if the main session was resumed across multiple files).
+    by_file: dict[str, set[int]] = defaultdict(set)
+    for m in msgs:
+        by_file[m["source_file"]].add(m["source_line"])
+    attrs_all: dict[tuple[str, int], list[dict]] = {}
+    for src, lines in by_file.items():
+        per_line = _parse_attributions(src, lines)
+        for ln, uses in per_line.items():
+            attrs_all[(src, ln)] = uses
+
+    last_model = next((m["model"] for m in reversed(msgs) if m["model"]), None)
+    model_max = _model_max(last_model)
+    turns = []
+    for idx, m in enumerate(msgs):
+        ctx_total = (m["input_tokens"] + m["cache_read"]
+                     + m["cache_write_5m"] + m["cache_write_1h"])
+        uses = attrs_all.get((m["source_file"], m["source_line"]), [])
+        turns.append({
+            "idx": idx + 1,
+            "ts": m["ts"],
+            "model": m["model"],
+            "input_tokens": m["input_tokens"],
+            "output_tokens": m["output_tokens"],
+            "cache_read": m["cache_read"],
+            "cache_write_5m": m["cache_write_5m"],
+            "cache_write_1h": m["cache_write_1h"],
+            "reasoning_tokens": m["reasoning_tokens"],
+            "context_total": ctx_total,
+            "model_max": _model_max(m["model"]),
+            "tool_uses": uses,
+        })
+
+    label_bits = []
+    first = msgs[0]
+    if first["agent_type"]:
+        label_bits.append(first["agent_type"])
+        if first["agent_id"]:
+            label_bits.append("#" + first["agent_id"][:8])
+        if first["agent_desc"]:
+            label_bits.append(first["agent_desc"])
+    else:
+        label_bits.append("main session")
+        if first.get("cwd"):
+            label_bits.append(first["cwd"])
+    return {
+        "label": " · ".join(label_bits),
+        "session_id": first["session_id"],
+        "agent_id": agent_id,
+        "cwd": first.get("cwd"),
+        "model": last_model,
+        "model_max_tokens": model_max,
+        "turns": turns,
     }
 
 

@@ -62,6 +62,9 @@ header {
   min-width: 140px;
 }
 .filters select { min-width: 180px; }
+/* Project paths are shown tail-truncated; cap the visible width so long paths don't
+   stretch the filter bar. */
+.filters select#f-project { max-width: 260px; }
 
 .cards {
   display: grid;
@@ -135,6 +138,36 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.cost { color: var(--accent-2); }
 td.dim { color: var(--text-mute); }
 .muted { color: var(--text-mute); }
+th.row-copy, td.row-copy { width: 28px; padding: 0 6px; text-align: right; }
+.ctx-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
+  padding: 2px 8px;
+  font: 11px ui-monospace, monospace;
+  cursor: pointer;
+}
+.ctx-btn:hover { color: var(--accent); border-color: var(--accent); }
+.timeline-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+@media (max-width: 1000px) {
+  .timeline-grid { grid-template-columns: 1fr; }
+}
+.row-copy-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-mute);
+  font: 12px ui-monospace, monospace;
+  padding: 2px 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+tr:hover .row-copy-btn { opacity: 1; }
+.row-copy-btn:hover { color: var(--accent); border-color: var(--border-strong); }
 
 .row-controls { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
 .row-controls label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; }

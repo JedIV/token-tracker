@@ -5,7 +5,8 @@
   <title>token tracker</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@3"></script>
+  <link rel="stylesheet" href="/static/styles.css?v=ctx5">
 </head>
 <body>
   <header>
@@ -44,6 +45,7 @@
     <span class="range-presets">
       <button class="btn range" data-range="1h">1h</button>
       <button class="btn range" data-range="24h">24h</button>
+      <button class="btn range" data-range="today">today</button>
       <button class="btn range" data-range="7d">7d</button>
       <button class="btn range" data-range="30d">30d</button>
       <button class="btn range" data-range="all">all</button>
@@ -95,6 +97,7 @@
       </span>
       <span id="group-controls"></span>
       <span class="muted" id="group-hint"></span>
+      <button id="copy-breakdown" class="btn" style="margin-left:auto" title="copy table as TSV (paste into Sheets/Excel/Slack)">copy</button>
     </div>
     <div class="chart-wrap breakdown-chart"><canvas id="chart-breakdown"></canvas></div>
     <table id="t-breakdown"></table>
@@ -114,6 +117,6 @@
     <span id="last-run" class="muted"></span>
   </footer>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=ctx5"></script>
 </body>
 </html>
