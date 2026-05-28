@@ -41,8 +41,23 @@ make down                                 # uninstall the agent
 The raw scripts (`scripts/run-server.sh`, `scripts/install-launchagent.sh`,
 `scripts/uninstall-launchagent.sh`) still work if you'd rather skip make.
 
+The installer drops a plist at `~/Library/LaunchAgents/com.user.token-tracker.plist`
+and registers it with `launchctl load -w` — the standard macOS path that EDR/MDM
+tools expect.
+
 The web UI also has a **re-ingest** button that triggers `POST /api/reingest` if you don't
 want to wait.
+
+### Note for humans and AI coding agents
+
+If you want this server or the ingest job to run in the background, **use the supplied
+installer above.** Do not use `launchctl submit` to register it ad-hoc. `launchctl submit`
+is a legacy interface that registers a launchd job without writing a plist to disk; many
+EDR products (Microsoft Defender for Endpoint, etc.) flag it as suspicious because
+file-less persistence is a known malware pattern. The installer in this repo uses the
+plist + `launchctl load` flow that EDR tools recognize as legitimate.
+
+For one-off foreground runs, just invoke `./scripts/run-server.sh` directly.
 
 ## What it tracks
 
